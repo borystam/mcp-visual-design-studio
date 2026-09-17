@@ -1,6 +1,6 @@
 # 0.1.1
 
-Fix a timing-sensitive inspector edit: immediately clearing a just-saved link or restoring a just-changed numeric value now queues the deliberate edit even before the earlier save reaches the browser. Untouched fields still produce no mutation. Additional delayed-response tests cover link/numeric reversals and preservation of a newer focused draft.
+Fix rapid consecutive inspector edits. Deliberate link/numeric reversions now save even before an earlier response reaches the browser. Compound changes to table cells, brands, crop axes, rich formatting, groups, page dimensions and ordering derive from the latest saved state when they execute, preserving earlier queued edits. Untouched fields still produce no mutation, and intervening changes from another actor still require review. Delayed-response regressions cover these cases and preservation of newer focused drafts.
 
 The application format and features are unchanged. Stop any workspace service started by 0.1.0 before installing the 0.1.1 tarball, then reconnect; saved documents remain in the external workspace. Registry publication has not been performed.
 

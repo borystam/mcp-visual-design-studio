@@ -235,11 +235,16 @@ try {
   console.log(
     `Installing ${metadata.filename} into a clean path with spaces and non-ASCII characters…`,
   );
-  await npm(["install", "--no-audit", "--no-fund", tarball], {
-    cwd: install,
-    env: { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" },
-    timeout: 120000,
-  });
+  await npm(
+    ["install", "--prefer-offline", "--no-audit", "--no-fund", tarball],
+    {
+      cwd: install,
+      env: { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" },
+      // Dependency provisioning can be slow on a clean hosted Windows runner.
+      // This remains a clean install; only npm's verified download cache is reused.
+      timeout: 240000,
+    },
+  );
   cli = path.join(
     install,
     "node_modules",

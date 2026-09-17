@@ -4,11 +4,11 @@ Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser i
 
 ## 0.1.1 validation
 
-The inspector acknowledgement fix adds a delayed-response field regression to the existing release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Patch-release results will be recorded after the candidate passes CI. The matrix below records the completed 0.1.0 implementation run.
+The inspector acknowledgement fix and execution-time operation builders add five delayed-response browser regressions to the original release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Additional compound-edit tests cover independent table cells/row/column additions, crop axes, brand fields and components with an uploaded logo, rich formatting followed by text saves, layer/page order, grouping and page orientation. All four compound regressions were confirmed to fail against the prior UI and pass with execution-time builders. Patch-release matrix results will be recorded after this candidate passes CI. The matrix below records the completed 0.1.0 implementation run.
 
 ## Local checks
 
-- Final local candidate: **69/69 unit/integration tests**, **17/17 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
+- Final local candidate: **69/69 unit/integration tests**, **21/21 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
 - Strict TypeScript checking and production build pass.
 - Unit/integration tests cover strict schemas, atomic batch failure, exact retries after restart, duplicate-operation payload conflicts, immutable revisions, crash recovery, document-identity isolation, guarded undo/redo, snapshots, variations, migration, safe imports and executable-content rejection.
 - Actual child processes cover competing writers, concurrent stale-owner recovery, SIGKILL recovery, live-PID protection and stale-release safety.
@@ -25,6 +25,8 @@ Native operating-system IME candidate windows are not automated; composition lif
 `npm run test:pack` creates and scans an actual tarball, installs it with dependencies into a clean directory with spaces and Japanese characters, and launches the installed CLI/MCP server. It verifies human/agent HTTP+SSE changes, comments and selection, safe undo preserving human text, image import, snapshots, EOF, restart/recovery, variations, PDF/PNG/HTML/bundle exports, real MCP image bytes, a bundle round trip into a second workspace and another edit there. A separate missing-browser environment verifies actionable diagnostics and ordinary editing/HTML export without automatic provisioning. The package allowlist and contents are scanned for private/runtime files, credentials and machine paths.
 
 The CI packed-package gate requires a working export browser; it cannot silently pass with PDF/PNG coverage skipped. Windows omits file-symlink creation tests that require developer-mode privileges and the owner-lock symlink subcase; directory-junction asset boundary checks still run.
+
+An actual installed-package upgrade from 0.1.0 to 0.1.1 was also exercised: the new CLI rejected reuse of the still-running older service; after stopping it with the old CLI, the new service retained workspace identity, document IDs, saved text and revision history. Retrying the original operation deduplicated correctly, and a new edit plus PNG preview succeeded after the upgrade.
 
 ## Real MCP hosts
 

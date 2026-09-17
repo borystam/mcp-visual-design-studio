@@ -976,6 +976,381 @@ test("text and numeric fields save deliberate reversions before earlier acknowle
   }
 });
 
+test("queued table cells and additions retain independent edits, as do image crop axes", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Queued composite fields");
+  const tableId = crypto.randomUUID(),
+    imageId = crypto.randomUUID();
+  await agent(doc.id, [
+    {
+      type: "add_element",
+      pageId: doc.pages[0].id,
+      element: {
+        id: tableId,
+        type: "table",
+        name: "Queue table",
+        x: 100,
+        y: 100,
+        width: 300,
+        height: 180,
+        style: {},
+        cells: [
+          ["A", "B"],
+          ["C", "D"],
+        ],
+      },
+    },
+    {
+      type: "add_element",
+      pageId: doc.pages[0].id,
+      element: {
+        id: imageId,
+        type: "image",
+        name: "Queue image",
+        x: 100,
+        y: 300,
+        width: 200,
+        height: 120,
+        style: {},
+        crop: { x: 50, y: 50 },
+      },
+    },
+  ]);
+  await page.locator(".layer").filter({ hasText: "Queue table" }).click();
+  const held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page
+      .getByRole("textbox", { name: "Row 1 column 1", exact: true })
+      .fill("Edited A");
+    await page
+      .getByRole("textbox", { name: "Row 1 column 2", exact: true })
+      .fill("Edited B");
+    await held.committed;
+    await page.getByRole("button", { name: "+ Row", exact: true }).click();
+    await page.getByRole("button", { name: "+ Column", exact: true }).click();
+    await page.locator(".layer").filter({ hasText: "Queue image" }).click();
+    await page
+      .getByRole("spinbutton", { name: "Crop X %", exact: true })
+      .fill("25");
+    await page
+      .getByRole("spinbutton", { name: "Crop Y %", exact: true })
+      .fill("75");
+    await page
+      .getByRole("spinbutton", { name: "Crop Y %", exact: true })
+      .press("Enter");
+  } finally {
+    held.release();
+  }
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(7);
+  const saved = await current(doc.id);
+  expect(
+    saved.pages[0].elements.find((element) => element.id === tableId)!.cells,
+  ).toEqual([
+    ["Edited A", "Edited B", "New cell"],
+    ["C", "D", "New cell"],
+    ["New cell", "New cell", "New cell"],
+  ]);
+  expect(
+    saved.pages[0].elements.find((element) => element.id === imageId)!.crop,
+  ).toEqual({ x: 25, y: 75 });
+});
+
+test("queued brand fields, components and saving the kit retain an uploaded logo and matching styles", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Queued brand edits");
+  const target = doc.pages[0].elements.find(
+    (element) => element.type === "text",
+  )!;
+  await agent(doc.id, [
+    {
+      type: "set_document",
+      patch: {
+        brand: {
+          ...doc.brand,
+          components: [
+            { ...target, id: crypto.randomUUID(), name: "Component A" },
+            { ...target, id: crypto.randomUUID(), name: "Component B" },
+          ],
+        },
+      },
+    },
+  ]);
+  await expect(page.getByText("Revision 1", { exact: false })).toBeVisible();
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page.getByRole("button", { name: "Brand", exact: true }).click();
+  const held = await holdNextOperation(page, doc.id, true);
+  try {
+    const choosing = page.waitForEvent("filechooser");
+    await page
+      .getByRole("button", { name: "Upload logo", exact: true })
+      .click();
+    await (
+      await choosing
+    ).setFiles({
+      name: "queued-logo.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=",
+        "base64",
+      ),
+    });
+    await held.committed;
+    const name = page.getByRole("textbox", { name: "Brand name", exact: true });
+    await name.fill("Combined brand");
+    await name.press("Enter");
+    await page.getByLabel("primary", { exact: true }).fill("#112233");
+    await page.getByLabel("accent", { exact: true }).fill("#aabbcc");
+    await page
+      .getByRole("combobox", { name: "heading font", exact: true })
+      .selectOption("monospace");
+    await page
+      .getByRole("combobox", { name: "body font", exact: true })
+      .selectOption("Lora");
+    await page
+      .getByRole("button", { name: "Save selection as component", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Save selection as component", exact: true })
+      .click();
+    await page
+      .getByRole("button", {
+        name: "Remove component Component A",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("button", {
+        name: "Remove component Component B",
+        exact: true,
+      })
+      .click();
+    await page.getByRole("button", { name: "Add color", exact: true }).click();
+    await page.getByRole("button", { name: "Add color", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Save brand kit", exact: true })
+      .click();
+  } finally {
+    held.release();
+  }
+  await expect(page.getByRole("status")).toContainText("Brand kit saved");
+  const saved = await current(doc.id);
+  expect(saved.revision).toBe(14);
+  expect(saved.brand.name).toBe("Combined brand");
+  expect(saved.brand.colors).toMatchObject({
+    primary: "#112233",
+    accent: "#aabbcc",
+  });
+  expect(Object.keys(saved.brand.colors)).toHaveLength(
+    Object.keys(doc.brand.colors).length + 2,
+  );
+  expect(saved.brand.fonts).toEqual({ heading: "monospace", body: "Lora" });
+  expect(saved.brand.logoAssetId).toBeTruthy();
+  expect(saved.assets[saved.brand.logoAssetId!]).toBeTruthy();
+  expect(saved.brand.components).toHaveLength(2);
+  for (const component of saved.brand.components) {
+    expect(component.name).toBe(target.name);
+    expect(component.style).toEqual(
+      saved.pages[0].elements.find((element) => element.id === target.id)!
+        .style,
+    );
+  }
+  expect(saved.pages[0].elements[0].style.background).toBe("#112233");
+  expect(
+    saved.pages[0].elements.find((element) =>
+      element.text?.includes("Good ideas."),
+    )!.style.fontFamily,
+  ).toBe("monospace");
+  expect(
+    (await call(`/api/brands`)).find(
+      (brand: any) => brand.id === saved.brand.id,
+    ),
+  ).toEqual(saved.brand);
+});
+
+test("queued rich-text toggles and a subsequent text save merge earlier formatting and links", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Queued rich formatting");
+  const target = doc.pages[0].elements.find(
+    (element) => element.type === "text",
+  )!;
+  const text = "Hello rich 😀 world";
+  await agent(doc.id, [
+    {
+      type: "update_element",
+      elementId: target.id,
+      patch: {
+        text,
+        runs: [
+          { text: "Hello " },
+          { text: "rich 😀", href: "https://example.com" },
+          { text: " world" },
+        ],
+      },
+    },
+  ]);
+  await expect(page.getByText("Revision 1", { exact: false })).toBeVisible();
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  const editor = page.getByTestId("text-editor");
+  await editor.evaluate((element: HTMLTextAreaElement) => {
+    element.focus();
+    element.setSelectionRange(6, 13);
+  });
+  const held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page.getByRole("button", { name: "Bold", exact: true }).click();
+    await held.committed;
+    await page.getByRole("button", { name: "Italic", exact: true }).click();
+    await page.getByRole("button", { name: "Underline", exact: true }).click();
+    await page.getByRole("button", { name: "Underline", exact: true }).click();
+    await editor.fill(`New ${text}!`);
+    await editor.press("Control+Enter");
+  } finally {
+    held.release();
+  }
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(6);
+  const saved = (await current(doc.id)).pages[0].elements.find(
+    (element) => element.id === target.id,
+  )!;
+  expect(saved.text).toBe(`New ${text}!`);
+  expect(saved.runs?.find((run) => run.text === "rich 😀")).toMatchObject({
+    bold: true,
+    italic: true,
+    underline: false,
+    href: "https://example.com",
+  });
+});
+
+test("queued ordering, grouping and page orientation build on earlier structural edits", async ({
+  page,
+}) => {
+  const doc = await call<Document>("/api/documents", {
+    name: "Queued structure",
+    template: "blank",
+  });
+  const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  await agent(doc.id, [
+    ...ids.map((id, index) => ({
+      type: "add_element",
+      pageId: doc.pages[0].id,
+      element: {
+        id,
+        type: "shape",
+        name: `Shape ${index + 1}`,
+        x: 100 * (index + 1),
+        y: 100,
+        width: 80,
+        height: 80,
+        style: {},
+      },
+    })),
+    ...[2, 3].map((index) => ({
+      type: "add_page",
+      page: {
+        ...doc.pages[0],
+        id: crypto.randomUUID(),
+        name: `Page ${index}`,
+        elements: [],
+      },
+    })),
+  ]);
+  await page.goto(editorUrl(service.descriptor, doc.id));
+  await expect(page.getByText("Saved locally")).toBeVisible();
+  await page.locator(".layer").filter({ hasText: "Shape 1" }).click();
+  let held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page
+      .getByRole("button", { name: "Bring forward", exact: true })
+      .click();
+    await held.committed;
+    await page
+      .getByRole("button", { name: "Bring forward", exact: true })
+      .click();
+  } finally {
+    held.release();
+  }
+  await expect(page.getByText("Revision 3", { exact: false })).toBeVisible();
+  expect(
+    (await current(doc.id)).pages[0].elements.map((element) => element.id),
+  ).toEqual([ids[1], ids[2], ids[0]]);
+  held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page.getByRole("spinbutton", { name: "X", exact: true }).fill("125");
+    await page
+      .getByRole("spinbutton", { name: "X", exact: true })
+      .press("Enter");
+    await held.committed;
+    await page
+      .locator(".layer")
+      .filter({ hasText: "Shape 2" })
+      .click({ modifiers: ["Shift"] });
+    await page
+      .getByRole("button", { name: "Group 2 elements", exact: true })
+      .click();
+  } finally {
+    held.release();
+  }
+  await expect(
+    page.getByRole("button", { name: "Ungroup section", exact: true }),
+  ).toBeVisible();
+  let saved = await current(doc.id);
+  const group = saved.pages[0].elements.find(
+    (element) => element.type === "group",
+  )!;
+  expect(group.x).toBe(125);
+  expect(group.children!.find((element) => element.id === ids[0])!.x).toBe(0);
+  expect(group.children!.find((element) => element.id === ids[1])!.x).toBe(75);
+  held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page.getByTestId("canvas").focus();
+    await page.keyboard.press("ArrowRight");
+    await held.committed;
+    await page
+      .getByRole("button", { name: "Ungroup section", exact: true })
+      .click();
+  } finally {
+    held.release();
+  }
+  await expect(page.getByText("Revision 7", { exact: false })).toBeVisible();
+  saved = await current(doc.id);
+  expect(
+    saved.pages[0].elements.find((element) => element.id === ids[0])!.x,
+  ).toBe(126);
+  expect(
+    saved.pages[0].elements.find((element) => element.id === ids[1])!.x,
+  ).toBe(201);
+  await page
+    .getByRole("button", { name: `Select ${doc.pages[0].name}`, exact: true })
+    .click();
+  held = await holdNextOperation(page, doc.id, true);
+  try {
+    await page
+      .getByRole("spinbutton", { name: "Page width", exact: true })
+      .fill("900");
+    await page
+      .getByRole("spinbutton", { name: "Page width", exact: true })
+      .press("Enter");
+    await held.committed;
+    await page.getByRole("button", { name: "Landscape", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Move page later", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Move page later", exact: true })
+      .click();
+  } finally {
+    held.release();
+  }
+  await expect(page.getByText("Revision 11", { exact: false })).toBeVisible();
+  expect((await current(doc.id)).pages[2]).toMatchObject({
+    id: doc.pages[0].id,
+    width: 1123,
+    height: 900,
+  });
+});
+
 test("save and rich-format acknowledgements retain typing and caret entered while responses wait", async ({
   page,
 }) => {

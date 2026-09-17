@@ -292,6 +292,7 @@ function Field({
   min,
   max,
   step = 1,
+  hideLabel = false,
 }: {
   label: string;
   value: string | number;
@@ -299,6 +300,7 @@ function Field({
   min?: number;
   max?: number;
   step?: number;
+  hideLabel?: boolean;
 }) {
   const [draft, setDraft] = useState(String(value));
   const focused = useRef(false);
@@ -308,7 +310,7 @@ function Field({
   }, [value]);
   return (
     <label className="field">
-      <span>{label}</span>
+      {!hideLabel && <span>{label}</span>}
       <input
         aria-label={label}
         type={typeof value === "number" ? "number" : "text"}
@@ -774,18 +776,100 @@ function App() {
     setNotice({ text: label });
     return result.document;
   }
-  function apply(operations: unknown[], label = "Changes saved") {
-    const current = docRef.current;
-    if (!current) return Promise.resolve(undefined);
-    return enqueueMutation(current.id, (current) =>
-      writeOperations(current, operations, label),
+  function apply(
+    operations: unknown[] | ((current: Doc) => unknown[]),
+    label = "Changes saved",
+  ) {
+    const documentId = doc?.id ?? docRef.current?.id;
+    if (!documentId) return Promise.resolve(undefined);
+    return enqueueMutation(documentId, (current) =>
+      writeOperations(
+        current,
+        typeof operations === "function" ? operations(current) : operations,
+        label,
+      ),
     );
   }
-  const patch = (patch: Partial<Item>, id = item?.id) =>
+  function currentItem(current: Doc, id: string) {
+    const found = locate(current, id)?.item;
+    if (!found)
+      throw new Error(
+        "The selected element no longer exists. Review the saved design before editing it.",
+      );
+    return found;
+  }
+  function currentPage(current: Doc, id: string) {
+    const found = current.pages.find((p) => p.id === id);
+    if (!found)
+      throw new Error(
+        "The selected page no longer exists. Review the saved design before editing it.",
+      );
+    return found;
+  }
+  const patch = (
+    changes: Partial<Item> | ((current: Item) => Partial<Item>),
+    id = item?.id,
+  ) =>
     id
-      ? apply([{ type: "update_element", elementId: id, patch }])
+      ? apply((current) => [
+          {
+            type: "update_element",
+            elementId: id,
+            patch:
+              typeof changes === "function"
+                ? changes(currentItem(current, id))
+                : changes,
+          },
+        ])
       : Promise.resolve(undefined);
   const style = (values: Style) => patch({ style: values });
+  function changeBrand(
+    change: (brand: Brand, current: Doc) => Brand,
+    reapply = false,
+    label = "Brand updated",
+  ) {
+    return apply((current) => {
+      const brand = change(current.brand, current);
+      return reapply
+        ? brandOperations(current, brand)
+        : [{ type: "set_document", patch: { brand } }];
+    }, label);
+  }
+  function reorderPage(id: string, delta: number) {
+    return apply((current) => {
+      currentPage(current, id);
+      return [
+        {
+          type: "move_page",
+          pageId: id,
+          index: Math.max(
+            0,
+            Math.min(
+              current.pages.length - 1,
+              current.pages.findIndex((p) => p.id === id) + delta,
+            ),
+          ),
+        },
+      ];
+    });
+  }
+  function orientPage(id: string, landscape: boolean) {
+    return apply((current) => {
+      const p = currentPage(current, id);
+      const smaller = Math.min(p.width, p.height),
+        larger = Math.max(p.width, p.height);
+      return [
+        {
+          type: "update_page",
+          pageId: id,
+          patch: {
+            width: landscape ? larger : smaller,
+            height: landscape ? smaller : larger,
+          },
+        },
+      ];
+    });
+  }
   function changeGeometry(
     documentId: string,
     ids: string[],
@@ -906,10 +990,10 @@ function App() {
       draft.text,
       draft.editVersion,
     );
-    const saved = await patch({
+    const saved = await patch((current) => ({
       text: draft.text,
-      runs: draftRuns(item, draft),
-    });
+      runs: preserveTextRuns(textOf(current), draft.text, current.runs),
+    }));
     if (saved) acknowledgeDraft(saved, item.id, draft.text, draft.editVersion);
     endWrite();
   }
@@ -969,19 +1053,25 @@ function App() {
     const start = textRef.current?.selectionStart ?? 0;
     const end = textRef.current?.selectionEnd ?? 0;
     if (start === end) {
-      if (kind === "bold")
-        await style({
-          fontWeight: Number(item.style.fontWeight ?? 400) >= 600 ? 400 : 700,
-        });
-      else if (kind === "italic")
-        await style({
-          fontStyle: item.style.fontStyle === "italic" ? "normal" : "italic",
-        });
-      else
-        await style({
-          textDecoration:
-            item.style.textDecoration === "underline" ? "none" : "underline",
-        });
+      await patch((current) => ({
+        style:
+          kind === "bold"
+            ? {
+                fontWeight:
+                  Number(current.style.fontWeight ?? 400) >= 600 ? 400 : 700,
+              }
+            : kind === "italic"
+              ? {
+                  fontStyle:
+                    current.style.fontStyle === "italic" ? "normal" : "italic",
+                }
+              : {
+                  textDecoration:
+                    current.style.textDecoration === "underline"
+                      ? "none"
+                      : "underline",
+                },
+      }));
       return;
     }
     if (draft?.remote !== undefined) {
@@ -993,40 +1083,42 @@ function App() {
       return;
     }
     const text = draft?.text ?? textOf(item);
-    const preserved = draft ? draftRuns(item, draft) : item.runs;
-    const source: TextRun[] = preserved?.length ? preserved : [{ text }];
-    let offset = 0;
-    const runs: TextRun[] = [];
-    for (const run of source) {
-      const stop = offset + run.text.length;
-      const cuts = [
-        offset,
-        ...[start, end].filter((n) => n > offset && n < stop),
-        stop,
-      ];
-      for (let i = 0; i < cuts.length - 1; i++)
-        runs.push({
-          ...run,
-          text: run.text.slice(cuts[i] - offset, cuts[i + 1] - offset),
-        });
-      offset = stop;
-    }
-    offset = 0;
-    const selectedRuns = runs.filter((run) => {
-      const overlaps = offset < end && offset + run.text.length > start;
-      offset += run.text.length;
-      return overlaps;
-    });
-    const enable = !selectedRuns.every((run) => run[kind]);
-    offset = 0;
-    const formatted = runs.map((run) => {
-      const overlaps = offset < end && offset + run.text.length > start;
-      offset += run.text.length;
-      return overlaps ? { ...run, [kind]: enable } : run;
-    });
     const version = draft?.editVersion ?? 0;
     const endWrite = beginDraftWrite(draftKey(doc!.id, item.id), text, version);
-    const saved = await patch({ text, runs: formatted });
+    const saved = await patch((current) => {
+      const preserved = preserveTextRuns(textOf(current), text, current.runs);
+      const source: TextRun[] = preserved?.length ? preserved : [{ text }];
+      let offset = 0;
+      const runs: TextRun[] = [];
+      for (const run of source) {
+        const stop = offset + run.text.length;
+        const cuts = [
+          offset,
+          ...[start, end].filter((n) => n > offset && n < stop),
+          stop,
+        ];
+        for (let i = 0; i < cuts.length - 1; i++)
+          runs.push({
+            ...run,
+            text: run.text.slice(cuts[i] - offset, cuts[i + 1] - offset),
+          });
+        offset = stop;
+      }
+      offset = 0;
+      const selectedRuns = runs.filter((run) => {
+        const overlaps = offset < end && offset + run.text.length > start;
+        offset += run.text.length;
+        return overlaps;
+      });
+      const enable = !selectedRuns.every((run) => run[kind]);
+      offset = 0;
+      const formatted = runs.map((run) => {
+        const overlaps = offset < end && offset + run.text.length > start;
+        offset += run.text.length;
+        return overlaps ? { ...run, [kind]: enable } : run;
+      });
+      return { text, runs: formatted };
+    });
     if (saved) {
       const unchanged =
         draftsRef.current[draftKey(saved.id, item.id)]?.text === text;
@@ -1162,81 +1254,104 @@ function App() {
       select(clones.map((e) => e.id));
   }
   async function reorder(delta: number) {
-    if (!info || !item) return;
-    const siblings = info.parentId
-      ? (locate(doc, info.parentId)?.item.children ?? [])
-      : info.page.elements;
-    await apply([
-      {
-        type: "move_element",
-        elementId: item.id,
-        pageId: info.page.id,
-        ...(info.parentId ? { parentId: info.parentId } : {}),
-        index: Math.max(
-          0,
-          Math.min(
-            siblings.length - 1,
-            siblings.findIndex((e) => e.id === item.id) + delta,
+    if (!item) return;
+    const id = item.id;
+    await apply((current) => {
+      const found = locate(current, id);
+      if (!found) throw new Error("The selected element no longer exists.");
+      const siblings = found.parentId
+        ? (currentItem(current, found.parentId).children ?? [])
+        : found.page.elements;
+      return [
+        {
+          type: "move_element",
+          elementId: id,
+          pageId: found.page.id,
+          ...(found.parentId ? { parentId: found.parentId } : {}),
+          index: Math.max(
+            0,
+            Math.min(
+              siblings.length - 1,
+              siblings.findIndex((element) => element.id === id) + delta,
+            ),
           ),
-        ),
-      },
-    ]);
+        },
+      ];
+    });
   }
   async function group() {
     if (!page || selected.length < 2) return;
-    const elements = page.elements.filter((e) => selected.includes(e.id));
-    if (elements.length !== selected.length) {
-      error(new Error("Select top-level elements on this page to group them."));
-      return;
-    }
-    const x = Math.min(...elements.map((e) => e.x)),
-      y = Math.min(...elements.map((e) => e.y));
-    const section: Item = {
-      id: uid(),
-      type: "group",
-      name: "Grouped section",
-      x,
-      y,
-      width: Math.max(...elements.map((e) => e.x + e.width)) - x,
-      height: Math.max(...elements.map((e) => e.y + e.height)) - y,
-      style: {},
-      layout: "position",
-      children: [],
-    };
-    if (
-      await apply([
-        { type: "add_element", pageId: page.id, element: section },
-        ...elements.flatMap((e, index) => [
+    const targetPageId = page.id,
+      ids = [...selected],
+      sectionId = uid();
+    const saved = await apply((current) => {
+      const target = currentPage(current, targetPageId);
+      const elements = target.elements.filter((element) =>
+        ids.includes(element.id),
+      );
+      if (elements.length !== ids.length)
+        throw new Error(
+          "Select top-level elements on this page to group them.",
+        );
+      const x = Math.min(...elements.map((element) => element.x)),
+        y = Math.min(...elements.map((element) => element.y));
+      const section: Item = {
+        id: sectionId,
+        type: "group",
+        name: "Grouped section",
+        x,
+        y,
+        width:
+          Math.max(...elements.map((element) => element.x + element.width)) - x,
+        height:
+          Math.max(...elements.map((element) => element.y + element.height)) -
+          y,
+        style: {},
+        layout: "position",
+        children: [],
+      };
+      return [
+        { type: "add_element", pageId: target.id, element: section },
+        ...elements.flatMap((element, index) => [
           {
             type: "move_element",
-            elementId: e.id,
-            pageId: page.id,
-            parentId: section.id,
+            elementId: element.id,
+            pageId: target.id,
+            parentId: sectionId,
             index,
           },
           {
             type: "update_element",
-            elementId: e.id,
-            patch: { x: e.x - x, y: e.y - y },
+            elementId: element.id,
+            patch: { x: element.x - x, y: element.y - y },
           },
         ]),
-      ])
-    )
-      select([section.id]);
+      ];
+    });
+    if (saved && docRef.current?.id === saved.id)
+      select([sectionId], targetPageId);
   }
   async function ungroup() {
     if (!page || item?.type !== "group") return;
-    const children =
-      item.children?.map((e) => ({ ...e, x: e.x + item.x, y: e.y + item.y })) ??
-      [];
-    if (
-      await apply([
+    const id = item.id,
+      targetPageId = page.id;
+    let children: Item[] = [];
+    const saved = await apply((current) => {
+      const target = currentPage(current, targetPageId),
+        section = currentItem(current, id);
+      children =
+        section.children?.map((element) => ({
+          ...element,
+          x: element.x + section.x,
+          y: element.y + section.y,
+        })) ?? [];
+      return [
         ...children.flatMap((element, index) => [
           {
             type: "move_element",
             elementId: element.id,
-            pageId: page.id,
-            index: page.elements.length + index,
+            pageId: target.id,
+            index: target.elements.length + index,
           },
           {
             type: "update_element",
@@ -1244,10 +1359,14 @@ function App() {
             patch: { x: element.x, y: element.y },
           },
         ]),
-        { type: "delete_element", elementId: item.id },
-      ])
-    )
-      select(children.map((e) => e.id));
+        { type: "delete_element", elementId: id },
+      ];
+    });
+    if (saved && docRef.current?.id === saved.id)
+      select(
+        children.map((element) => element.id),
+        targetPageId,
+      );
   }
   async function upload(file: File) {
     const documentId = docRef.current?.id;
@@ -1767,21 +1886,13 @@ function App() {
                           title="Move page earlier"
                           icon="back"
                           disabled={i === 0}
-                          onClick={() =>
-                            void apply([
-                              { type: "move_page", pageId: p.id, index: i - 1 },
-                            ])
-                          }
+                          onClick={() => void reorderPage(p.id, -1)}
                         />
                         <Button
                           title="Move page later"
                           icon="arrow"
                           disabled={i === doc.pages.length - 1}
-                          onClick={() =>
-                            void apply([
-                              { type: "move_page", pageId: p.id, index: i + 1 },
-                            ])
-                          }
+                          onClick={() => void reorderPage(p.id, 1)}
                         />
                         <Button
                           title="Duplicate page"
@@ -2526,7 +2637,9 @@ function App() {
                           min={0}
                           max={100}
                           onChange={(x) =>
-                            void patch({ crop: { x, y: item.crop?.y ?? 50 } })
+                            void patch((current) => ({
+                              crop: { x, y: current.crop?.y ?? 50 },
+                            }))
                           }
                         />
                         <Field
@@ -2535,7 +2648,9 @@ function App() {
                           min={0}
                           max={100}
                           onChange={(y) =>
-                            void patch({ crop: { x: item.crop?.x ?? 50, y } })
+                            void patch((current) => ({
+                              crop: { x: current.crop?.x ?? 50, y },
+                            }))
                           }
                         />
                       </div>
@@ -2551,22 +2666,22 @@ function App() {
                         {item.cells?.map((row, r) => (
                           <div key={r}>
                             {row.map((cell, c) => (
-                              <input
-                                key={`${item.id}-${r}-${c}-${cell}`}
-                                aria-label={`Row ${r + 1} column ${c + 1}`}
-                                defaultValue={cell}
-                                onBlur={(e) => {
-                                  if (e.target.value !== cell)
-                                    void patch({
-                                      cells: item.cells?.map((rr, ri) =>
-                                        ri === r
-                                          ? rr.map((cc, ci) =>
-                                              ci === c ? e.target.value : cc,
-                                            )
-                                          : rr,
-                                      ),
-                                    });
-                                }}
+                              <Field
+                                key={`${item.id}-${r}-${c}`}
+                                label={`Row ${r + 1} column ${c + 1}`}
+                                hideLabel
+                                value={cell}
+                                onChange={(text) =>
+                                  void patch((current) => ({
+                                    cells: current.cells?.map((row, ri) =>
+                                      ri === r
+                                        ? row.map((value, ci) =>
+                                            ci === c ? text : value,
+                                          )
+                                        : row,
+                                    ),
+                                  }))
+                                }
                               />
                             ))}
                           </div>
@@ -2575,23 +2690,26 @@ function App() {
                       <div className="row-actions">
                         <Button
                           onClick={() =>
-                            void patch({
+                            void patch((current) => ({
                               cells: [
-                                ...(item.cells ?? []),
-                                Array(item.cells?.[0]?.length ?? 2).fill(
+                                ...(current.cells ?? []),
+                                Array(current.cells?.[0]?.length ?? 2).fill(
                                   "New cell",
                                 ),
                               ],
-                            })
+                            }))
                           }
                         >
                           + Row
                         </Button>
                         <Button
                           onClick={() =>
-                            void patch({
-                              cells: item.cells?.map((r) => [...r, "New cell"]),
-                            })
+                            void patch((current) => ({
+                              cells: current.cells?.map((row) => [
+                                ...row,
+                                "New cell",
+                              ]),
+                            }))
                           }
                         >
                           + Column
@@ -2753,35 +2871,13 @@ function App() {
                     <div className="row-actions">
                       <Button
                         active={page.width <= page.height}
-                        onClick={() =>
-                          void apply([
-                            {
-                              type: "update_page",
-                              pageId: page.id,
-                              patch: {
-                                width: Math.min(page.width, page.height),
-                                height: Math.max(page.width, page.height),
-                              },
-                            },
-                          ])
-                        }
+                        onClick={() => void orientPage(page.id, false)}
                       >
                         Portrait
                       </Button>
                       <Button
                         active={page.width > page.height}
-                        onClick={() =>
-                          void apply([
-                            {
-                              type: "update_page",
-                              pageId: page.id,
-                              patch: {
-                                width: Math.max(page.width, page.height),
-                                height: Math.min(page.width, page.height),
-                              },
-                            },
-                          ])
-                        }
+                        onClick={() => void orientPage(page.id, true)}
                       >
                         Landscape
                       </Button>
@@ -2852,12 +2948,7 @@ function App() {
                   label="Brand name"
                   value={doc.brand.name}
                   onChange={(name) =>
-                    void apply([
-                      {
-                        type: "set_document",
-                        patch: { brand: { ...doc.brand, name } },
-                      },
-                    ])
+                    void changeBrand((brand) => ({ ...brand, name }))
                   }
                 />
                 <div className="section-label spaced">PALETTE</div>
@@ -2871,11 +2962,12 @@ function App() {
                     label={name}
                     value={color}
                     onChange={(value) =>
-                      void apply(
-                        brandOperations(doc, {
-                          ...doc.brand,
-                          colors: { ...doc.brand.colors, [name]: value },
+                      void changeBrand(
+                        (brand) => ({
+                          ...brand,
+                          colors: { ...brand.colors, [name]: value },
                         }),
+                        true,
                         "Brand palette applied across matching elements",
                       )
                     }
@@ -2885,21 +2977,17 @@ function App() {
                   icon="plus"
                   className="full"
                   onClick={() =>
-                    void apply([
-                      {
-                        type: "set_document",
-                        patch: {
-                          brand: {
-                            ...doc.brand,
-                            colors: {
-                              ...doc.brand.colors,
-                              [`color_${Object.keys(doc.brand.colors).length + 1}`]:
-                                "#f27e63",
-                            },
-                          },
+                    void changeBrand((brand) => {
+                      let index = Object.keys(brand.colors).length + 1;
+                      while (`color_${index}` in brand.colors) index++;
+                      return {
+                        ...brand,
+                        colors: {
+                          ...brand.colors,
+                          [`color_${index}`]: "#f27e63",
                         },
-                      },
-                    ])
+                      };
+                    })
                   }
                 >
                   Add color
@@ -2911,19 +2999,18 @@ function App() {
                     <select
                       aria-label={`${role} font`}
                       value={doc.brand.fonts[role]}
-                      onChange={(e) =>
-                        void apply(
-                          brandOperations(doc, {
-                            ...doc.brand,
-                            fonts: {
-                              ...doc.brand.fonts,
-                              [role]: e.target
-                                .value as Brand["fonts"]["heading"],
-                            },
+                      onChange={(e) => {
+                        const font = e.target
+                          .value as Brand["fonts"]["heading"];
+                        void changeBrand(
+                          (brand) => ({
+                            ...brand,
+                            fonts: { ...brand.fonts, [role]: font },
                           }),
+                          true,
                           "Brand fonts applied across matching elements",
-                        )
-                      }
+                        );
+                      }}
                     >
                       {fonts.map((font) => (
                         <option key={font}>{font}</option>
@@ -2990,43 +3077,33 @@ function App() {
                   icon="plus"
                   className="full"
                   disabled={!item}
-                  onClick={() =>
-                    item &&
-                    void apply([
-                      {
-                        type: "set_document",
-                        patch: {
-                          brand: {
-                            ...doc.brand,
-                            components: [...doc.brand.components, fresh(item)],
-                          },
-                        },
-                      },
-                    ])
-                  }
+                  onClick={() => {
+                    if (!item) return;
+                    const id = item.id;
+                    void changeBrand((brand, current) => ({
+                      ...brand,
+                      components: [
+                        ...brand.components,
+                        fresh(currentItem(current, id)),
+                      ],
+                    }));
+                  }}
                 >
                   Save selection as component
                 </Button>
-                {doc.brand.components.map((c, i) => (
+                {doc.brand.components.map((c) => (
                   <div className="component-row" key={c.id}>
                     <span>{c.name}</span>
                     <Button
                       title={`Remove component ${c.name}`}
                       icon="close"
                       onClick={() =>
-                        void apply([
-                          {
-                            type: "set_document",
-                            patch: {
-                              brand: {
-                                ...doc.brand,
-                                components: doc.brand.components.filter(
-                                  (_, n) => n !== i,
-                                ),
-                              },
-                            },
-                          },
-                        ])
+                        void changeBrand((brand) => ({
+                          ...brand,
+                          components: brand.components.filter(
+                            (component) => component.id !== c.id,
+                          ),
+                        }))
                       }
                     />
                   </div>
@@ -3037,15 +3114,14 @@ function App() {
                   className="primary full"
                   icon="check"
                   onClick={() =>
-                    void api("/api/brands", doc.brand)
-                      .then(() => api<Brand[]>("/api/brands"))
-                      .then((brands) => {
-                        setWorkspace((w) => (w ? { ...w, brands } : w));
-                        setNotice({
-                          text: "Brand kit saved to this workspace",
-                        });
-                      })
-                      .catch(error)
+                    void enqueueMutation(doc.id, async (current) => {
+                      await api("/api/brands", current.brand);
+                      const brands = await api<Brand[]>("/api/brands");
+                      setWorkspace((workspace) =>
+                        workspace ? { ...workspace, brands } : workspace,
+                      );
+                      setNotice({ text: "Brand kit saved to this workspace" });
+                    })
                   }
                 >
                   Save brand kit

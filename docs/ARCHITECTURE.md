@@ -24,7 +24,7 @@ Text drafts remain in the browser while SSE refreshes the saved document. An unr
 
 Plain text editing in the inspector remaps unchanged Unicode characters to their previous rich-text runs, preserving unaffected bold/italic/underline styling and explicit links. Newly inserted characters use the element’s base typography. A bounded deterministic diff keeps large pastes responsive; very large replacements may reset run formatting inside the replaced region while retaining unchanged leading and trailing content. The inspector submits the resulting text and runs together.
 
-Browser mutations execute sequentially. A queued edit may advance past acknowledged earlier edits from the same browser, but an intervening external revision requires review. An ambiguous failure cancels pending writes without replay. Switching designs cancels queued edits for the old design. Unsaved drafts are session-local, not durable until saved; export always uses saved content.
+Browser mutations execute sequentially. Compound changes and relative gestures use operation builders evaluated against the latest saved document when they execute; stale replacement arrays or objects cannot erase earlier queued browser edits. A queued edit may advance past acknowledged earlier edits from the same browser, but an intervening external revision requires review. An ambiguous failure cancels pending writes without replay. Switching designs cancels queued edits for the old design. Unsaved drafts are session-local, not durable until saved; export always uses saved content.
 
 No remote multiplayer, CRDT, arbitrary JavaScript tool or model API is implemented. Comments are passive document data, not a push notification into the host's agent loop.
 

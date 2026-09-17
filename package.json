@@ -38,8 +38,6 @@
     "test:pack": "node tests/packed-smoke.mjs"
   },
   "dependencies": {
-    "@fontsource/inter": "^5.2.8",
-    "@fontsource/lora": "^5.2.8",
     "@modelcontextprotocol/server": "2.0.0",
     "@xmldom/xmldom": "^0.9.12",
     "pdf-lib": "^1.17.1",
@@ -50,6 +48,8 @@
   },
   "devDependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/lora": "^5.3.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@playwright/test": "1.63.0",
     "@types/node": "^24.0.0",
