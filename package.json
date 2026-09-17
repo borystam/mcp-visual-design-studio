@@ -1,0 +1,63 @@
+{
+  "name": "mcp-visual-design-studio",
+  "version": "0.1.0",
+  "description": "A local visual document editor shared by people and MCP agents.",
+  "type": "module",
+  "license": "MIT",
+  "author": "MCP Visual Design Studio contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/borystam/mcp-visual-design-studio.git"
+  },
+  "homepage": "https://github.com/borystam/mcp-visual-design-studio#readme",
+  "bugs": {
+    "url": "https://github.com/borystam/mcp-visual-design-studio/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "mcp-visual-design-studio": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && vite build",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:e2e": "playwright test",
+    "prepack": "npm run build",
+    "start": "node dist/cli.js editor",
+    "dev": "npm run build && node dist/cli.js editor --workspace .local/dev --no-open",
+    "test:pack": "node tests/packed-smoke.mjs"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/lora": "^5.2.8",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@xmldom/xmldom": "^0.9.12",
+    "pdf-lib": "^1.17.1",
+    "playwright": "1.63.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "prettier": "^3.9.7",
+    "tsx": "^4.20.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  }
+}

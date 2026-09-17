@@ -1,0 +1,506 @@
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomUUID, createHash } from "node:crypto";
+import { chromium, type Browser, type Page as BrowserPage } from "playwright";
+import { PDFDocument } from "pdf-lib";
+import { DocumentView } from "../render/DocumentView.js";
+import { documentCss, fontFiles } from "../render/styles.js";
+import {
+  validateDocument,
+  type Document,
+  type Asset,
+} from "../domain/model.js";
+import {
+  importAsset,
+  inspectAsset,
+  readVerifiedAsset,
+  safeDirectory,
+  MAX_BUNDLE_BYTES,
+  MAX_ASSET_BYTES,
+} from "./assets.js";
+export {
+  importAsset,
+  assetDiskPath,
+  readVerifiedAsset,
+  MAX_ASSET_BYTES,
+  MAX_BUNDLE_BYTES,
+} from "./assets.js";
+
+const fontDir = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../assets/fonts",
+);
+let embeddedCss: string | undefined;
+function exportCss() {
+  return (embeddedCss ??= fontFiles.reduce(
+    (css, [, , , file]) =>
+      css.replaceAll(
+        `/assets/fonts/${file}`,
+        `data:font/woff2;base64,${readFileSync(join(fontDir, file)).toString("base64")}`,
+      ),
+    documentCss,
+  ));
+}
+const escape = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ]!,
+  );
+export function renderHtml(
+  doc: Document,
+  resolveAsset: (id: string) => string,
+): string {
+  const checked = validateDocument(doc);
+  return (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src &#39;self&#39; data:; font-src data:; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>' +
+    escape(checked.name) +
+    "</title><style>" +
+    exportCss() +
+    "\nbody{margin:0;padding:24px;background:#e8e8e8;}a{cursor:pointer}</style></head><body>" +
+    renderToStaticMarkup(
+      React.createElement(DocumentView, {
+        document: checked,
+        assetUrl: resolveAsset,
+      }),
+    ) +
+    "</body></html>"
+  );
+}
+export type ExportDiagnostics = {
+  revision: number;
+  pageCount: number;
+  pages: { id: string; width: number; height: number }[];
+  fonts: { family: string; loaded: boolean }[];
+  overflow: { elementId: string; pageId: string; reason: string }[];
+  images: { elementId: string; loaded: boolean }[];
+  links: { href: string; text: string }[];
+  warnings: string[];
+};
+function emptyDiagnostics(doc: Document): ExportDiagnostics {
+  return {
+    revision: doc.revision,
+    pageCount: doc.pages.length,
+    pages: doc.pages.map((p) => ({
+      id: p.id,
+      width: p.width,
+      height: p.height,
+    })),
+    fonts: [],
+    overflow: [],
+    images: [],
+    links: [],
+    warnings: [],
+  };
+}
+export async function browserHealth(): Promise<object> {
+  const executable = chromium.executablePath();
+  if (!existsSync(executable))
+    return {
+      ok: false,
+      exportBrowser: false,
+      message:
+        "Chromium is not installed. Ordinary editing and HTML/bundle export remain available.",
+      command: "mcp-visual-design-studio setup-export",
+    };
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ headless: true, timeout: 15000 });
+    return { ok: true, exportBrowser: true, version: browser.version() };
+  } catch (error) {
+    return {
+      ok: false,
+      exportBrowser: false,
+      message: String(error),
+      command: "mcp-visual-design-studio setup-export",
+      linuxHint:
+        "On Linux, run npx playwright install-deps chromium if system libraries are missing.",
+    };
+  } finally {
+    await browser?.close();
+  }
+}
+async function diagnose(
+  page: BrowserPage,
+  doc: Document,
+): Promise<ExportDiagnostics> {
+  const result = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const fonts = await Promise.all(
+      ["Inter", "Lora", "IBM Plex Mono"].map(async (family) => {
+        try {
+          const loaded = await document.fonts.load(`16px "${family}"`);
+          return {
+            family,
+            loaded:
+              loaded.length > 0 && document.fonts.check(`16px "${family}"`),
+          };
+        } catch {
+          return { family, loaded: false };
+        }
+      }),
+    );
+    const overflow: { elementId: string; pageId: string; reason: string }[] =
+      [];
+    for (const element of document.querySelectorAll<HTMLElement>(
+      "[data-element-id]",
+    )) {
+      const page = element.closest<HTMLElement>("[data-page-id]")!;
+      const a = element.getBoundingClientRect(),
+        b = page.getBoundingClientRect();
+      const reasons = [];
+      if (
+        a.left < b.left - 0.5 ||
+        a.top < b.top - 0.5 ||
+        a.right > b.right + 0.5 ||
+        a.bottom > b.bottom + 0.5
+      )
+        reasons.push("extends outside page");
+      if (
+        element.scrollHeight > element.clientHeight + 1 ||
+        element.scrollWidth > element.clientWidth + 1
+      )
+        reasons.push("content exceeds element bounds");
+      if (reasons.length)
+        overflow.push({
+          elementId: element.dataset.elementId!,
+          pageId: page.dataset.pageId!,
+          reason: reasons.join("; "),
+        });
+    }
+    const images = await Promise.all(
+      Array.from(
+        document.querySelectorAll<HTMLImageElement>(".vds-image img"),
+      ).map(async (img) => {
+        try {
+          await img.decode();
+        } catch {}
+        return {
+          elementId:
+            img.closest<HTMLElement>("[data-element-id]")!.dataset.elementId!,
+          loaded: img.complete && img.naturalWidth > 0,
+        };
+      }),
+    );
+    const links = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>(".vds-element a"),
+    ).map((a) => ({ href: a.href, text: a.textContent ?? "" }));
+    return { fonts, overflow, images, links };
+  });
+  return {
+    ...emptyDiagnostics(doc),
+    ...result,
+    warnings: [
+      ...(result.fonts.some((f) => !f.loaded)
+        ? ["One or more bundled fonts did not load."]
+        : []),
+      ...(result.images.some((i) => !i.loaded)
+        ? ["One or more images could not be decoded."]
+        : []),
+    ],
+  };
+}
+function base64(data: unknown, max = MAX_ASSET_BYTES): Buffer {
+  if (
+    typeof data !== "string" ||
+    data.length > Math.ceil(max / 3) * 4 ||
+    data.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      data,
+    )
+  )
+    throw new Error("Invalid or oversized base64 data");
+  const result = Buffer.from(data, "base64");
+  if (result.length > max) throw new Error("Decoded data exceeds size limit");
+  return result;
+}
+function keys(
+  value: unknown,
+  allowed: string[],
+): asserts value is Record<string, unknown> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).some((k) => !allowed.includes(k))
+  )
+    throw new Error("Invalid project bundle structure");
+}
+export function importBundle(data: Buffer, assetsDir: string): Document {
+  if (data.length === 0 || data.length > MAX_BUNDLE_BYTES)
+    throw new Error("Project bundle must contain 1 byte–100 MiB");
+  let bundle: unknown;
+  try {
+    bundle = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+  } catch {
+    throw new Error("Project bundle must be valid UTF-8 JSON");
+  }
+  keys(bundle, ["format", "version", "document", "assets"]);
+  if (
+    bundle.format !== "mcp-visual-design-studio" ||
+    bundle.version !== 1 ||
+    !Array.isArray(bundle.assets) ||
+    bundle.assets.length > 1000
+  )
+    throw new Error("Unsupported project bundle format");
+  const doc = validateDocument(bundle.document);
+  const pending: { asset: Asset; data: Buffer }[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const item of bundle.assets) {
+    keys(item, ["id", "data"]);
+    if (
+      typeof item.id !== "string" ||
+      seen.has(item.id) ||
+      !Object.hasOwn(doc.assets, item.id)
+    )
+      throw new Error("Bundle asset IDs must be unique and match the document");
+    seen.add(item.id);
+    const raw = base64(item.data);
+    total += raw.length;
+    if (total > 75 * 1024 * 1024)
+      throw new Error("Bundle assets exceed 75 MiB");
+    const asset = doc.assets[item.id];
+    const checked = inspectAsset(raw);
+    if (
+      checked.data.length !== asset.bytes ||
+      checked.sha256 !== asset.sha256 ||
+      checked.mime !== asset.mime ||
+      asset.id !== `asset_${checked.sha256}` ||
+      !checked.data.equals(raw)
+    )
+      throw new Error(`Bundle asset metadata or hash mismatch: ${asset.name}`);
+    pending.push({ asset, data: raw });
+  }
+  if (seen.size !== Object.keys(doc.assets).length)
+    throw new Error("Bundle is missing document assets");
+  // Validate the entire bundle before writing any asset. Immutable content-addressed writes are safe to retry.
+  for (const { asset, data: raw } of pending)
+    importAsset(raw, asset.name, assetsDir);
+  const now = new Date().toISOString();
+  return validateDocument({
+    ...doc,
+    id: `doc_${randomUUID().replaceAll("-", "")}`,
+    revision: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+export async function exportDocument(
+  input: Document,
+  format: "pdf" | "png" | "html" | "bundle",
+  assetsDir: string,
+  outDir: string,
+  options: { pageId?: string; signal?: AbortSignal } = {},
+): Promise<{ filename: string; path: string; diagnostics: ExportDiagnostics }> {
+  // Clone and validate at entry: callers may continue editing another revision during export.
+  const original = validateDocument(structuredClone(input));
+  if (!["pdf", "png", "html", "bundle"].includes(format))
+    throw new Error("Unsupported export format");
+  if (options.signal?.aborted) throw new Error("Export cancelled");
+  const selected = options.pageId
+    ? original.pages.filter((p) => p.id === options.pageId)
+    : original.pages;
+  if (!selected.length) throw new Error("Page does not exist");
+  const doc =
+    format === "bundle"
+      ? original
+      : {
+          ...original,
+          pages: selected,
+          comments: original.comments.filter(
+            (c) => !c.pageId || selected.some((p) => p.id === c.pageId),
+          ),
+        };
+  // Selection is a rendering concern; anchored comments may reference other pages, so validate original only.
+  const renderDoc = { ...doc, comments: [] };
+  if (
+    Object.values(original.assets).reduce(
+      (sum, asset) => sum + asset.bytes,
+      0,
+    ) >
+    75 * 1024 * 1024
+  )
+    throw new Error("Document assets exceed the 75 MiB export limit");
+  const assets = new Map(
+    Object.values(original.assets).map((asset) => [
+      asset.id,
+      { asset, data: readVerifiedAsset(asset, assetsDir) },
+    ]),
+  );
+  const resolver = (id: string) => {
+    const entry = assets.get(id);
+    if (!entry) throw new Error(`Missing asset ${id}`);
+    return `data:${entry.asset.mime};base64,${entry.data.toString("base64")}`;
+  };
+  const filename = `${
+    original.name
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 60) || "document"
+  }-r${original.revision}-${randomUUID().slice(0, 8)}.${format === "bundle" ? "vds.json" : format}`;
+  safeDirectory(outDir, true);
+  const path = join(resolve(outDir), filename);
+  const temporary = `${path}.tmp`;
+  let bytes: Buffer,
+    diagnostics = emptyDiagnostics(doc);
+  if (format === "bundle") {
+    bytes = Buffer.from(
+      JSON.stringify(
+        {
+          format: "mcp-visual-design-studio",
+          version: 1,
+          document: original,
+          assets: Array.from(assets.values()).map(({ asset, data }) => ({
+            id: asset.id,
+            data: data.toString("base64"),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    if (bytes.length > MAX_BUNDLE_BYTES)
+      throw new Error("Project bundle exceeds the 100 MiB limit");
+    diagnostics.warnings.push(
+      "Portable source bundle; browser layout diagnostics are available through PNG or PDF rendering.",
+    );
+  } else if (format === "html") {
+    bytes = Buffer.from(renderHtml(renderDoc, resolver));
+    diagnostics.warnings.push(
+      "Standalone HTML includes bundled fonts and assets; browser layout diagnostics are available through PNG or PDF rendering.",
+    );
+  } else {
+    if (doc.pages.some((p) => p.width * p.height > 40_000_000))
+      throw new Error(
+        "Export pages are limited to 40 megapixels. Reduce the page dimensions.",
+      );
+    const fullWidth = Math.ceil(Math.max(...doc.pages.map((p) => p.width))),
+      fullHeight = Math.ceil(
+        doc.pages.reduce((n, p) => n + p.height, 0) +
+          (doc.pages.length - 1) * 24,
+      );
+    if (
+      format === "png" &&
+      (fullWidth > 32767 ||
+        fullHeight > 32767 ||
+        fullWidth * fullHeight > 100_000_000)
+    )
+      throw new Error(
+        "PNG is too large. Export one page using pageId or reduce dimensions.",
+      );
+    let browser: Browser | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    let cancelled = false;
+    const abort = () => {
+      cancelled = true;
+      void browser?.close();
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (!existsSync(chromium.executablePath()))
+        throw new Error(
+          "Export browser is missing. Run: mcp-visual-design-studio setup-export",
+        );
+      browser = await chromium.launch({ headless: true, timeout: 15000 });
+      if (options.signal?.aborted) throw new Error("Export cancelled");
+      timer = setTimeout(abort, 90000);
+      timer.unref();
+      const context = await browser.newContext({
+        javaScriptEnabled: false,
+        serviceWorkers: "block",
+        viewport: { width: Math.min(fullWidth, 10000), height: 1000 },
+        deviceScaleFactor: 1,
+      });
+      await context.route("**/*", (route) => route.abort("blockedbyclient"));
+      const page = await context.newPage();
+      page.setDefaultTimeout(15000);
+      if (format === "png") {
+        await page.setContent(renderHtml(renderDoc, resolver), {
+          waitUntil: "load",
+        });
+        diagnostics = await diagnose(page, doc);
+        bytes = await page
+          .locator(".vds-document")
+          .screenshot({ type: "png", animations: "disabled", timeout: 30000 });
+      } else {
+        const pdf = await PDFDocument.create();
+        diagnostics = emptyDiagnostics(doc);
+        for (const sourcePage of doc.pages) {
+          if (cancelled)
+            throw new Error(
+              "Export cancelled or exceeded the 90-second time limit",
+            );
+          await page.setContent(
+            renderHtml({ ...renderDoc, pages: [sourcePage] }, resolver),
+            { waitUntil: "load" },
+          );
+          const current = await diagnose(page, {
+            ...renderDoc,
+            pages: [sourcePage],
+          });
+          diagnostics.fonts = current.fonts;
+          diagnostics.overflow.push(...current.overflow);
+          diagnostics.images.push(...current.images);
+          diagnostics.links.push(...current.links);
+          diagnostics.warnings.push(...current.warnings);
+          await page.emulateMedia({ media: "print" });
+          const output = await page.pdf({
+            width: `${sourcePage.width}px`,
+            height: `${sourcePage.height}px`,
+            printBackground: true,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            scale: 1,
+            tagged: true,
+          });
+          const part = await PDFDocument.load(output);
+          if (part.getPageCount() !== 1)
+            throw new Error(
+              `Page ${sourcePage.name} unexpectedly produced ${part.getPageCount()} PDF pages`,
+            );
+          const [copy] = await pdf.copyPages(part, [0]);
+          copy.setSize(sourcePage.width * 0.75, sourcePage.height * 0.75);
+          pdf.addPage(copy);
+        }
+        pdf.setTitle(original.name);
+        pdf.setCreator("MCP Visual Design Studio");
+        pdf.setProducer("MCP Visual Design Studio / Chromium");
+        bytes = Buffer.from(await pdf.save());
+      }
+      await context.close();
+    } catch (error) {
+      if (cancelled || options.signal?.aborted)
+        throw new Error(
+          "Export cancelled or exceeded the 90-second time limit",
+        );
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+      await browser?.close();
+    }
+  }
+  if (options.signal?.aborted) throw new Error("Export cancelled");
+  try {
+    writeFileSync(temporary, bytes, { mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  diagnostics.warnings = [...new Set(diagnostics.warnings)];
+  return { filename, path, diagnostics };
+}
