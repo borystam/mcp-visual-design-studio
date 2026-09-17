@@ -4,7 +4,7 @@ Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser i
 
 ## 0.1.1 validation
 
-The inspector acknowledgement fix and execution-time operation builders add five delayed-response browser regressions to the original release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Additional compound-edit tests cover independent table cells/row/column additions, crop axes, brand fields and components with an uploaded logo, rich formatting followed by text saves, layer/page order, grouping and page orientation. All four compound regressions were confirmed to fail against the prior UI and pass with execution-time builders. Patch-release matrix results will be recorded after this candidate passes CI. The matrix below records the completed 0.1.0 implementation run.
+The inspector acknowledgement fix and execution-time operation builders add five delayed-response browser regressions to the original release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Additional compound-edit tests cover independent table cells/row/column additions, crop axes, brand fields and components with an uploaded logo, rich formatting followed by text saves, layer/page order, grouping and page orientation. All four compound regressions were confirmed to fail against the prior UI and pass with execution-time builders. The patch candidate passed all six clean platform/Node combinations, including all 21 browser regressions and the installed-package smoke flow. The matrix below records this 0.1.1 implementation run.
 
 ## Local checks
 
@@ -32,13 +32,13 @@ An actual installed-package upgrade from 0.1.0 to 0.1.1 was also exercised: the 
 
 | Host | Version | Environment | Observed result |
 | --- | --- | --- | --- |
-| Codex CLI | 0.154.0 | macOS arm64; Node 26.5.0 | Workspace, template creation, read, atomic text edit, selection/comments read and actual PNG image inspection passed. An initially malformed operation was rejected; the corrected targeted update succeeded. |
+| Codex CLI | 0.154.0 | macOS arm64; Node 26.5.0 | Workspace, template creation, read, atomic text edit, selection/comments read and actual PNG image inspection passed. Two invalid edit payloads were rejected; the corrected targeted batch succeeded. |
 | Claude Code | 2.1.263 | macOS arm64; Node 26.5.0 | Brochure creation, atomic heading edit, actual PNG image inspection, anchored comment creation and comment read passed. |
 | Official SDK client | 2.0.0 | Source and installed-package tests | Real stdio process and protocol discovery/calls passed; this is separate from real-host evidence. |
 
 Codex described the edited cream serif heading, evergreen upper page, cream lower page, sage ring and peach shapes. Claude Code described the updated heading and terracotta courtyard illustration. Both reported visible image pixels and clear rendered content; neither was credited solely for receiving an image envelope.
 
-Both real-host sessions were repeated against the CLI from a clean installation of the 0.1.0 candidate tarball (the MCP implementation and renderer are unchanged in 0.1.1). Saved headings and revisions were independently read from the service afterward: Codex revision 1, Claude revision 2 with one anchored comment. Both host processes exited successfully, and their test workspace services were stopped.
+Both real-host sessions were repeated against the CLI from a clean installation of the 0.1.1 candidate tarball at commit `932e08e`. Saved headings, histories and comment anchors were independently verified afterward: Codex revision 2 with one anchored comment; Claude revision 3 with an anchored heading comment added in a narrow host follow-up after its initial comment was document-level. The original comment was retained. Actual 794 × 1123 preview PNGs were also verified. Both host processes and the follow-up exited successfully, and both test workspace services were stopped.
 
 No claim is made for other hosts or the Codex desktop app UI specifically. Host auth/session logs are private ignored artifacts and are not distributed.
 
@@ -48,13 +48,13 @@ All six pages across Fieldwork (one), Gather (three), and Signal (two) were insp
 
 ## Platform matrix
 
-[The release implementation passed all six matrix jobs and the package job](https://github.com/borystam/mcp-visual-design-studio/actions/runs/35212643375) at commit `8e5f97b`. Subsequent release preparation changes only this validation report.
+[The release implementation passed all six matrix jobs and the package job](https://github.com/borystam/mcp-visual-design-studio/actions/runs/35215370197) at commit `932e08e`. Subsequent release preparation changes only this validation report.
 
 | Clean GitHub-hosted environment | Architecture | Observed Node versions | Result |
 | --- | --- | --- | --- |
-| Ubuntu 24.04.5 LTS | x64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 16 browser tests and installed-package smoke. |
-| macOS 26.6.2 (25G83) | arm64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 16 browser tests and installed-package smoke. |
-| Windows Server 2025 Datacenter (10.0.26100) | x64 | 22.12.0 and 24.20.0 | Both passed: 68 unit/integration tests plus one explicit symlink skip, 16 browser tests and installed-package smoke. |
+| Ubuntu 24.04.5 LTS | x64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 21 browser tests and installed-package smoke. |
+| macOS 26.6.2 (25G83) | arm64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 21 browser tests and installed-package smoke. |
+| Windows Server 2025 Datacenter (10.0.26100) | x64 | 22.12.0 and 24.20.0 | Both passed: 68 unit/integration tests plus one explicit symlink skip, 21 browser tests and installed-package smoke. |
 
 Each installed-package run rendered PDF/PNG and real preview pixels, exported HTML and a portable bundle, imported into another workspace and continued editing. The package job produced an npm tarball and SHA-256 checksum only after every matrix job passed.
 
