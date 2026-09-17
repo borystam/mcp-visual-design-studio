@@ -32,6 +32,8 @@ The CI packed-package gate requires a working export browser; it cannot silently
 
 Codex described the edited cream serif heading, evergreen upper page, cream lower page, sage ring and peach shapes. Claude Code described the updated heading and terracotta courtyard illustration. Both reported visible image pixels and clear rendered content; neither was credited solely for receiving an image envelope.
 
+Both real-host sessions were repeated against the CLI from a clean installation of the final candidate tarball. Saved headings and revisions were independently read from the service afterward: Codex revision 1, Claude revision 2 with one anchored comment. Both host processes exited successfully, and their test workspace services were stopped.
+
 No claim is made for other hosts or the Codex desktop app UI specifically. Host auth/session logs are private ignored artifacts and are not distributed.
 
 ## Visual inspection
@@ -40,4 +42,14 @@ All six pages across Fieldwork (one), Gather (three), and Signal (two) were insp
 
 ## Platform matrix
 
-Local development and all above checks ran on macOS arm64 / Node 26.5.0. GitHub Actions jobs target clean Ubuntu Linux, macOS and Windows on the minimum Node 22.12.0 and current Node 24 LTS, including the installed tarball. Their final observed results will be recorded here before tagging. Firefox, Safari, unsupported writing systems, remote-only hosts, network filesystems and other processor/OS combinations are unverified.
+[The release implementation passed all six matrix jobs and the package job](https://github.com/borystam/mcp-visual-design-studio/actions/runs/35212643375) at commit `8e5f97b`. Subsequent release preparation changes only this validation report.
+
+| Clean GitHub-hosted environment | Architecture | Observed Node versions | Result |
+| --- | --- | --- | --- |
+| Ubuntu 24.04.5 LTS | x64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 16 browser tests and installed-package smoke. |
+| macOS 26.6.2 (25G83) | arm64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 16 browser tests and installed-package smoke. |
+| Windows Server 2025 Datacenter (10.0.26100) | x64 | 22.12.0 and 24.20.0 | Both passed: 68 unit/integration tests plus one explicit symlink skip, 16 browser tests and installed-package smoke. |
+
+Each installed-package run rendered PDF/PNG and real preview pixels, exported HTML and a portable bundle, imported into another workspace and continued editing. The package job produced an npm tarball and SHA-256 checksum only after every matrix job passed.
+
+Local development and real-host tests additionally ran on macOS arm64 / Node 26.5.0. Firefox, Safari, native IME candidate windows, unsupported writing systems, remote-only hosts, network filesystems and other processor/OS combinations are unverified.
