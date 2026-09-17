@@ -401,6 +401,7 @@ function App() {
   const [showResolved, setShowResolved] = useState(false);
   const [drag, setDrag] = useState<{
     id: string;
+    documentId: string;
     mode: "move" | "resize";
     sx: number;
     sy: number;
@@ -409,7 +410,10 @@ function App() {
     item: Item;
   }>();
   const dragRef = useRef(drag);
-  dragRef.current = drag;
+  function updateDrag(next: typeof drag) {
+    dragRef.current = next;
+    setDrag(next);
+  }
   const assetInput = useRef<HTMLInputElement>(null);
   const bundleInput = useRef<HTMLInputElement>(null);
   const uploadMode = useRef<"new" | "replace" | "logo">("new");
@@ -780,6 +784,39 @@ function App() {
       ? apply([{ type: "update_element", elementId: id, patch }])
       : Promise.resolve(undefined);
   const style = (values: Style) => patch({ style: values });
+  function changeGeometry(
+    documentId: string,
+    ids: string[],
+    dx: number,
+    dy: number,
+    mode: "move" | "resize" = "move",
+    snap = false,
+  ) {
+    return enqueueMutation(documentId, (current) => {
+      // Relative gestures must build on earlier acknowledged browser changes,
+      // even when those changes have not painted when this gesture is queued.
+      const value = (n: number) => (snap ? Math.round(n) : n);
+      const operations = ids.map((id) => {
+        const element = locate(current, id)?.item;
+        if (!element)
+          throw new Error(
+            "The selected element no longer exists. Review the saved design before moving it.",
+          );
+        return {
+          type: "update_element",
+          elementId: id,
+          patch:
+            mode === "move"
+              ? { x: value(element.x + dx), y: value(element.y + dy) }
+              : {
+                  width: Math.max(10, value(element.width + dx)),
+                  height: Math.max(4, value(element.height + dy)),
+                },
+        };
+      });
+      return writeOperations(current, operations);
+    });
+  }
   function select(ids: string[], p = page?.id) {
     setSelected(ids);
     if (p) setPageId(p);
@@ -1383,7 +1420,7 @@ function App() {
     });
   }
   function pointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    if (e.button !== 0 || !page) return;
+    if (e.button !== 0 || !page || !doc) return;
     const target = (e.target as HTMLElement).closest<HTMLElement>(
       "[data-element-id]",
     );
@@ -1409,8 +1446,9 @@ function App() {
       (!hit.parentId || locate(doc, hit.parentId)?.item.layout === "position")
     ) {
       e.currentTarget.setPointerCapture(e.pointerId);
-      setDrag({
+      updateDrag({
         id,
+        documentId: doc.id,
         mode: "move",
         sx: e.clientX,
         sy: e.clientY,
@@ -1423,17 +1461,9 @@ function App() {
   function finishDrag() {
     const d = dragRef.current;
     if (!d) return;
-    setDrag(undefined);
+    updateDrag(undefined);
     if (Math.abs(d.dx) < 1 && Math.abs(d.dy) < 1) return;
-    void patch(
-      d.mode === "move"
-        ? { x: Math.round(d.item.x + d.dx), y: Math.round(d.item.y + d.dy) }
-        : {
-            width: Math.max(10, Math.round(d.item.width + d.dx)),
-            height: Math.max(4, Math.round(d.item.height + d.dy)),
-          },
-      d.id,
-    );
+    void changeGeometry(d.documentId, [d.id], d.dx, d.dy, d.mode, true);
   }
   const draftPage =
     page && item?.type === "text" && dirty
@@ -1985,19 +2015,16 @@ function App() {
                   }}
                   onPointerDown={pointerDown}
                   onPointerMove={(e) => {
-                    if (dragRef.current)
-                      setDrag((d) =>
-                        d
-                          ? {
-                              ...d,
-                              dx: (e.clientX - d.sx) / zoom,
-                              dy: (e.clientY - d.sy) / zoom,
-                            }
-                          : d,
-                      );
+                    const d = dragRef.current;
+                    if (d)
+                      updateDrag({
+                        ...d,
+                        dx: (e.clientX - d.sx) / zoom,
+                        dy: (e.clientY - d.sy) / zoom,
+                      });
                   }}
                   onPointerUp={finishDrag}
-                  onPointerCancel={() => setDrag(undefined)}
+                  onPointerCancel={() => updateDrag(undefined)}
                   onDoubleClick={(e) => {
                     const target = (
                       e.target as HTMLElement
@@ -2023,30 +2050,19 @@ function App() {
                       ].includes(e.key)
                     ) {
                       e.preventDefault();
-                      void apply(
-                        selected.map((id) => {
-                          const current = locate(doc, id)!.item;
-                          return {
-                            type: "update_element",
-                            elementId: id,
-                            patch: {
-                              x:
-                                current.x +
-                                (e.key === "ArrowLeft"
-                                  ? -amount
-                                  : e.key === "ArrowRight"
-                                    ? amount
-                                    : 0),
-                              y:
-                                current.y +
-                                (e.key === "ArrowUp"
-                                  ? -amount
-                                  : e.key === "ArrowDown"
-                                    ? amount
-                                    : 0),
-                            },
-                          };
-                        }),
+                      void changeGeometry(
+                        doc.id,
+                        [...selected],
+                        e.key === "ArrowLeft"
+                          ? -amount
+                          : e.key === "ArrowRight"
+                            ? amount
+                            : 0,
+                        e.key === "ArrowUp"
+                          ? -amount
+                          : e.key === "ArrowDown"
+                            ? amount
+                            : 0,
                       );
                     }
                     if (e.key === "Delete" || e.key === "Backspace") {
@@ -2076,8 +2092,9 @@ function App() {
                           e.currentTarget.parentElement!.parentElement!.setPointerCapture(
                             e.pointerId,
                           );
-                          setDrag({
+                          updateDrag({
                             id: canvasItem.id,
+                            documentId: doc.id,
                             mode: "resize",
                             sx: e.clientX,
                             sy: e.clientY,

@@ -4,7 +4,7 @@ Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser i
 
 ## Local checks
 
-- Final local candidate: **69/69 unit/integration tests**, **15/15 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
+- Final local candidate: **69/69 unit/integration tests**, **16/16 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
 - Strict TypeScript checking and production build pass.
 - Unit/integration tests cover strict schemas, atomic batch failure, exact retries after restart, duplicate-operation payload conflicts, immutable revisions, crash recovery, document-identity isolation, guarded undo/redo, snapshots, variations, migration, safe imports and executable-content rejection.
 - Actual child processes cover competing writers, concurrent stale-owner recovery, SIGKILL recovery, live-PID protection and stale-release safety.
@@ -12,6 +12,7 @@ Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser i
 - Real Chromium exports verify PNG pixels, PDF native text/fonts, clickable links, page count, mixed dimensions, saved-revision consistency, overflow, cancellation and image decoding.
 - Playwright browser tests exercise manual text edits, caret/focus preservation during unrelated updates, synthetic composition events, same-field conflicts, image upload, drag, keyboard movement, comments, agent edits, safe undo, snapshots, variations, bundle export, reload/reconnect, rich-text selection, grouping and keyboard dialogs. Deterministic delayed-response tests cover serialized browser writes, committed-but-aborted responses without automatic replay, switching documents while writes are pending and intervening agent changes.
 - Further browser regressions preserve new typing during delayed text/format saves, retain newer remote conflicts, isolate drafts across documents with identical element IDs, retain rich formatting through plain edits and recover drafts after element/page deletion.
+- A held-response regression queues multiple drags, resizes and nudges before earlier saves are acknowledged, then verifies every relative change accumulates. It was confirmed to fail against the earlier stale-coordinate implementation and pass with geometry derived from the latest saved state.
 
 Native operating-system IME candidate windows are not automated; composition lifecycle events are tested in Chromium. Unsaved browser drafts are retained across incoming updates but are not persisted across closing the tab.
 

@@ -496,6 +496,99 @@ test("overlapping browser edits wait for the prior save response, including imag
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
+test("queued drags, resizes and repeated keyboard nudges use the latest saved geometry", async ({
+  page,
+}) => {
+  const doc = await call<Document>("/api/documents", {
+    name: "Queued relative geometry",
+    template: "blank",
+  });
+  const elementId = crypto.randomUUID();
+  await agent(doc.id, [
+    {
+      type: "add_element",
+      pageId: doc.pages[0].id,
+      element: {
+        id: elementId,
+        type: "shape",
+        name: "Geometry target",
+        x: 100,
+        y: 100,
+        width: 200,
+        height: 120,
+        style: { background: "#556677" },
+      },
+    },
+  ]);
+  await page.goto(editorUrl(service.descriptor, doc.id));
+  const canvas = page.getByTestId("canvas");
+  await expect(canvas).toBeVisible();
+  await expect(page.getByText("Saved locally")).toBeVisible();
+  await page.locator(".layer").filter({ hasText: "Geometry target" }).click();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed!: () => void;
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let requests = 0;
+  // Hold both acknowledgment channels so the following gestures are guaranteed
+  // to begin on the older rendered geometry, just as in the CI failure trace.
+  await page.route(`**/api/documents/${doc.id}`, async (route) => {
+    const response = await route.fetch();
+    await held;
+    await route.fulfill({ response });
+  });
+  await page.route(`**/api/documents/${doc.id}/operations`, async (route) => {
+    requests++;
+    const response = await route.fetch();
+    if (requests === 1) {
+      committed();
+      await held;
+    }
+    await route.fulfill({ response });
+  });
+  const scale = (await canvas.boundingBox())!.width / doc.pages[0].width;
+  async function gesture(resize: boolean, dx: number, dy: number) {
+    const target = resize
+      ? page.getByRole("button", { name: "Resize selected element" })
+      : canvas.locator(`[data-element-id="${elementId}"]`);
+    const bounds = (await target.boundingBox())!;
+    const x = bounds.x + (resize ? bounds.width / 2 : 20);
+    const y = bounds.y + (resize ? bounds.height / 2 : 20);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx * scale, y + dy * scale);
+    await page.mouse.up();
+  }
+  try {
+    await gesture(false, 50, 20);
+    await firstCommitted;
+    expect((await current(doc.id)).pages[0].elements[0].x).toBe(150);
+    await gesture(false, 20, -10);
+    await gesture(true, 30, 20);
+    await gesture(true, 10, 10);
+    await canvas.focus();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Shift+ArrowDown");
+    await page.keyboard.press("ArrowLeft");
+    expect(requests).toBe(1);
+  } finally {
+    release();
+  }
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(9);
+  expect((await current(doc.id)).pages[0].elements[0]).toMatchObject({
+    x: 171,
+    y: 120,
+    width: 240,
+    height: 150,
+  });
+  await expect(page.locator(".toast[role=alert]")).toHaveCount(0);
+});
+
 test("an ambiguous failed save cancels queued writes without automatically replaying either", async ({
   page,
 }) => {
