@@ -4,14 +4,14 @@
 
 ![Studio editor with the original Fieldwork example](docs/demo.png)
 
-[Watch the short editing demo](docs/demo.webm) · [Release](https://github.com/borystam/mcp-visual-design-studio/releases/tag/v0.1.0) · [Compatibility and test evidence](docs/VALIDATION.md)
+[Watch the short editing demo](docs/demo.webm) · [Release](https://github.com/borystam/mcp-visual-design-studio/releases/tag/v0.1.1) · [Compatibility and test evidence](docs/VALIDATION.md)
 
 ## Install the release
 
 Use **Node.js 24 LTS** (Node 22.12+ also supported). Download and install the release tarball; this version is **not published to the npm registry**.
 
 ```sh
-npm install -g https://github.com/borystam/mcp-visual-design-studio/releases/download/v0.1.0/mcp-visual-design-studio-0.1.0.tgz
+npm install -g https://github.com/borystam/mcp-visual-design-studio/releases/download/v0.1.1/mcp-visual-design-studio-0.1.1.tgz
 mcp-visual-design-studio doctor
 mcp-visual-design-studio editor
 ```

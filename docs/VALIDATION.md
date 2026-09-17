@@ -2,9 +2,13 @@
 
 Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser interaction, real agent hosts and visual inspection are distinct evidence below.
 
+## 0.1.1 validation
+
+The inspector acknowledgement fix adds a delayed-response field regression to the existing release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Patch-release results will be recorded after the candidate passes CI. The matrix below records the completed 0.1.0 implementation run.
+
 ## Local checks
 
-- Final local candidate: **69/69 unit/integration tests**, **16/16 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
+- Final local candidate: **69/69 unit/integration tests**, **17/17 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
 - Strict TypeScript checking and production build pass.
 - Unit/integration tests cover strict schemas, atomic batch failure, exact retries after restart, duplicate-operation payload conflicts, immutable revisions, crash recovery, document-identity isolation, guarded undo/redo, snapshots, variations, migration, safe imports and executable-content rejection.
 - Actual child processes cover competing writers, concurrent stale-owner recovery, SIGKILL recovery, live-PID protection and stale-release safety.
@@ -32,7 +36,7 @@ The CI packed-package gate requires a working export browser; it cannot silently
 
 Codex described the edited cream serif heading, evergreen upper page, cream lower page, sage ring and peach shapes. Claude Code described the updated heading and terracotta courtyard illustration. Both reported visible image pixels and clear rendered content; neither was credited solely for receiving an image envelope.
 
-Both real-host sessions were repeated against the CLI from a clean installation of the final candidate tarball. Saved headings and revisions were independently read from the service afterward: Codex revision 1, Claude revision 2 with one anchored comment. Both host processes exited successfully, and their test workspace services were stopped.
+Both real-host sessions were repeated against the CLI from a clean installation of the 0.1.0 candidate tarball (the MCP implementation and renderer are unchanged in 0.1.1). Saved headings and revisions were independently read from the service afterward: Codex revision 1, Claude revision 2 with one anchored comment. Both host processes exited successfully, and their test workspace services were stopped.
 
 No claim is made for other hosts or the Codex desktop app UI specifically. Host auth/session logs are private ignored artifacts and are not distributed.
 

@@ -329,7 +329,9 @@ function Field({
           changed.current = false;
           const next =
             typeof value === "number" ? Number(e.target.value) : e.target.value;
-          if (didChange && next !== value) onChange(next);
+          // A deliberate edit can match stale props while an earlier submission
+          // is still awaiting acknowledgment (for example, set then clear).
+          if (didChange) onChange(next);
           else setDraft(String(value));
         }}
         onKeyDown={(e) => {

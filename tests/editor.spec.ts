@@ -863,7 +863,11 @@ test("draft recovery works when an agent removes the entire edited page", async 
   ).toBe(true);
 });
 
-async function holdNextOperation(page: Page, documentId: string) {
+async function holdNextOperation(
+  page: Page,
+  documentId: string,
+  holdRefresh = false,
+) {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -873,6 +877,13 @@ async function holdNextOperation(page: Page, documentId: string) {
     notify = resolve;
   });
   let first = true;
+  if (holdRefresh) {
+    await page.route(`**/api/documents/${documentId}`, async (route) => {
+      const response = await route.fetch();
+      await gate;
+      await route.fulfill({ response });
+    });
+  }
   await page.route(
     `**/api/documents/${documentId}/operations`,
     async (route) => {
@@ -888,6 +899,82 @@ async function holdNextOperation(page: Page, documentId: string) {
   );
   return { release, committed };
 }
+
+test("text and numeric fields save deliberate reversions before earlier acknowledgements without losing newer drafts", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Delayed field acknowledgements");
+  const target = doc.pages[0].elements.find(
+    (element) => element.type === "text",
+  )!;
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  let revision = doc.revision;
+  for (const spec of [
+    {
+      role: "textbox" as const,
+      label: "Link URL",
+      initial: "",
+      first: "https://example.com",
+      next: "https://example.com/new-draft",
+      property: "href" as const,
+    },
+    {
+      role: "spinbutton" as const,
+      label: "X",
+      initial: String(target.x),
+      first: String(target.x + 20),
+      next: String(target.x + 30),
+      property: "x" as const,
+    },
+  ]) {
+    const field = page.getByRole(spec.role, { name: spec.label, exact: true });
+    const held = await holdNextOperation(page, doc.id, true);
+    try {
+      await field.fill(spec.first);
+      await field.press("Enter");
+      await held.committed;
+      await field.fill(spec.initial);
+      await field.press("Enter");
+      // A further edit remains unsaved and focused while both queued saves
+      // acknowledge. Neither response may reset this draft or its caret.
+      await field.fill(spec.next);
+      if (spec.role === "textbox") {
+        await field.evaluate((el: HTMLInputElement) =>
+          el.setSelectionRange(8, 8),
+        );
+      }
+    } finally {
+      held.release();
+    }
+    revision += 2;
+    await expect
+      .poll(async () => (await current(doc.id)).revision)
+      .toBe(revision);
+    const saved = (await current(doc.id)).pages[0].elements.find(
+      (element) => element.id === target.id,
+    )!;
+    expect(saved[spec.property]).toBe(
+      spec.property === "href" ? undefined : target.x,
+    );
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue(spec.next);
+    if (spec.role === "textbox") {
+      expect(
+        await field.evaluate((el: HTMLInputElement) => el.selectionStart),
+      ).toBe(8);
+    }
+    await field.press("Enter");
+    revision++;
+    await expect
+      .poll(async () => (await current(doc.id)).revision)
+      .toBe(revision);
+    expect(
+      (await current(doc.id)).pages[0].elements.find(
+        (element) => element.id === target.id,
+      )![spec.property],
+    ).toBe(spec.property === "href" ? spec.next : Number(spec.next));
+  }
+});
 
 test("save and rich-format acknowledgements retain typing and caret entered while responses wait", async ({
   page,
