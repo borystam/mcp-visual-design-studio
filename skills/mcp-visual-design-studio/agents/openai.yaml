@@ -1,0 +1,7 @@
+interface:
+  display_name: "MCP Visual Design Studio"
+  short_description: "Editable collateral and reusable design systems"
+  default_prompt: "Use $mcp-visual-design-studio to create or refine an editable document and verify its exported layout."
+
+policy:
+  allow_implicit_invocation: true

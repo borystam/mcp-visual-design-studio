@@ -61,6 +61,25 @@ Open the returned private localhost link. Change the text in the inspector and s
 
 Browser comments **do not wake an idle agent**. Ask the connected host to read them. Studio contains no integrated chat, model routing or cloud service.
 
+## Install the companion Codex skill
+
+The [MCP Visual Design Studio skill](skills/mcp-visual-design-studio/SKILL.md) teaches agents the persistent document workflow: targeted edits, revision conflicts, design-system imports, visual checks and exports. Install the app and register its MCP server first; the skill supplies instructions, not the server.
+
+From a clone of this repository, copy the complete skill folder into Codex's user skill directory:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+cp -R skills/mcp-visual-design-studio "$HOME/.agents/skills/"
+```
+
+For an existing installation, replace that skill folder with the updated copy. Codex discovers local skill changes automatically; restart it if the skill does not appear. Start a fresh session after adding the MCP configuration. See the [official skill setup documentation](https://developers.openai.com/codex/skills/).
+
+Invoke it explicitly with `$mcp-visual-design-studio`, or ask Codex to use MCP Visual Design Studio for an editable brochure, one-pager or visual report. For example:
+
+> Use $mcp-visual-design-studio to create an editable service sheet using my workspace design system. Render and inspect it, then give me the editor link.
+
+The skill includes portable instructions and generic examples. Local configuration, document content and private editor links stay outside the skill.
+
 ## What is included
 
 - Blank canvas plus **Fieldwork** service sheet, **Gather** three-page brochure, and **Signal** two-page visual report. All examples are original and generic.
