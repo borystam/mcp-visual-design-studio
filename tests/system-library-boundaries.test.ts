@@ -24,13 +24,52 @@ function fixture(t: TestContext) {
   });
   return { root, assets, library, system };
 }
+function onWindows<T>(run: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...original, value: "win32" });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+}
+function withStats<T extends fs.Stats | fs.BigIntStats>(
+  stats: T,
+  changed: Partial<T>,
+): T {
+  return Object.assign(
+    Object.create(Object.getPrototypeOf(stats)),
+    stats,
+    changed,
+  );
+}
 
 test("library versions and defaults survive restart, key ordering does not create a new release", (t) => {
   const { root, assets, library, system } = fixture(t);
   const saved = library.save(system);
   const ref = { id: system.id, version: system.version, digest: saved.digest };
-  library.setDefault(ref);
   const file = path.join(library.directory, "boundary@1.0.0.json");
+  if (process.platform === "win32") {
+    const before = fs.lstatSync(file, { bigint: true }),
+      descriptor = fs.openSync(file, fs.constants.O_RDONLY);
+    try {
+      const handle = fs.fstatSync(descriptor, { bigint: true }),
+        after = fs.lstatSync(file, { bigint: true });
+      t.diagnostic(
+        JSON.stringify({
+          windowsLibraryIdentity: Object.fromEntries(
+            Object.entries({ before, handle, after }).map(([name, stat]) => [
+              name,
+              { ino: String(stat.ino), dev: String(stat.dev) },
+            ]),
+          ),
+        }),
+      );
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+  library.setDefault(ref);
   const bytes = fs.readFileSync(file);
   const reordered = structuredClone(system);
   reordered.tokens = Object.fromEntries(
@@ -55,6 +94,153 @@ test("library versions and defaults survive restart, key ordering does not creat
   assert.deepEqual(restarted.getDefault(), ref);
   restarted.setDefault(null);
   assert.equal(new DesignSystemLibrary(root, assets).getDefault(), null);
+});
+
+test("Windows library reads retain exact inode checks with zero or wider path device IDs", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    lstat = fs.lstatSync,
+    fstat = fs.fstatSync;
+  let pathDevice = 0n;
+  const inode = 9007199254740993n;
+  t.mock.method(fs, "lstatSync", (...args: any[]) => {
+    const stat = (lstat as any)(...args);
+    if (args[0] !== file) return stat;
+    assert.equal(args[1]?.bigint, true);
+    return withStats(stat, { dev: pathDevice, ino: inode });
+  });
+  t.mock.method(fs, "fstatSync", (...args: any[]) => {
+    assert.equal(args[1]?.bigint, true);
+    return withStats((fstat as any)(...args), { dev: 0x1234n, ino: inode });
+  });
+  for (const device of [0n, 0xabcd00001234n]) {
+    pathDevice = device;
+    assert.deepEqual(
+      onWindows(() => library.read(system.id, system.version).system),
+      system,
+    );
+  }
+});
+
+test("Windows guard handles reject another volume even when inode and content match", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    lstat = fs.lstatSync,
+    fstat = fs.fstatSync,
+    open = fs.openSync,
+    close = fs.closeSync;
+  const handles = new Set<number>();
+  let checked = 0;
+  t.mock.method(fs, "lstatSync", (...args: any[]) => {
+    const stat = (lstat as any)(...args);
+    return args[0] === file ? withStats(stat, { dev: 0n }) : stat;
+  });
+  t.mock.method(fs, "openSync", (...args: any[]) => {
+    const fd = (open as any)(...args);
+    handles.add(fd);
+    return fd;
+  });
+  t.mock.method(fs, "closeSync", (fd: number) => {
+    handles.delete(fd);
+    return close(fd);
+  });
+  t.mock.method(fs, "fstatSync", (...args: any[]) =>
+    withStats((fstat as any)(...args), { dev: ++checked === 1 ? 123n : 456n }),
+  );
+  assert.throws(
+    () => onWindows(() => library.read(system.id, system.version)),
+    /changed during read/,
+  );
+  assert.equal(checked, 2);
+  assert.equal(handles.size, 0);
+});
+
+test("library rejects inode changes that Number stats would round to the same value", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    lstat = fs.lstatSync,
+    fstat = fs.fstatSync;
+  const originalInode = 9007199254740992n,
+    replacementInode = originalInode + 1n;
+  assert.equal(Number(originalInode), Number(replacementInode));
+  t.mock.method(fs, "lstatSync", (...args: any[]) => {
+    const stat = (lstat as any)(...args);
+    return args[0] === file ? withStats(stat, { ino: originalInode }) : stat;
+  });
+  t.mock.method(fs, "fstatSync", (...args: any[]) =>
+    withStats((fstat as any)(...args), { ino: replacementInode }),
+  );
+  assert.throws(
+    () => library.read(system.id, system.version),
+    /changed during read/,
+  );
+});
+
+test("library rejects path replacement after opening even with identical JSON", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    bytes = fs.readFileSync(file),
+    open = fs.openSync;
+  let replaced = false;
+  t.mock.method(fs, "openSync", (...args: any[]) => {
+    const fd = (open as any)(...args);
+    if (args[0] === file && !replaced) {
+      replaced = true;
+      fs.renameSync(file, `${file}.old`);
+      fs.writeFileSync(file, bytes);
+    }
+    return fd;
+  });
+  assert.throws(
+    () => onWindows(() => library.read(system.id, system.version)),
+    /changed during read/,
+  );
+});
+
+test("library rejects a symlink observed after opening its original file", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    lstat = fs.lstatSync;
+  let reads = 0;
+  t.mock.method(fs, "lstatSync", (...args: any[]) => {
+    const stat = (lstat as any)(...args);
+    return args[0] === file && ++reads > 1
+      ? withStats(stat, { isSymbolicLink: () => true })
+      : stat;
+  });
+  assert.throws(
+    () => onWindows(() => library.read(system.id, system.version)),
+    /changed during read/,
+  );
+});
+
+test("library bounds reads and rejects a file that grows after descriptor validation", (t) => {
+  const { library, system } = fixture(t);
+  library.save(system);
+  const file = path.join(library.directory, "boundary@1.0.0.json"),
+    initialSize = fs.statSync(file).size,
+    read = fs.readSync;
+  let grown = false,
+    totalRead = 0;
+  t.mock.method(fs, "readSync", (...args: any[]) => {
+    if (!grown) {
+      grown = true;
+      fs.appendFileSync(file, " ".repeat(4096));
+    }
+    const count = (read as any)(...args);
+    totalRead += count;
+    return count;
+  });
+  assert.throws(
+    () => library.read(system.id, system.version),
+    /changed during read/,
+  );
+  assert.equal(totalRead, initialSize + 1);
 });
 
 test("library refuses traversal, changed release contents, forged digests and identity swaps", (t) => {

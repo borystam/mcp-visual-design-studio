@@ -4,7 +4,7 @@ Observed on 2026-09-17. Source tests, installed-package tests, browser interacti
 
 ## 0.2.0 local checks
 
-Strict TypeScript checking and the production build pass. The candidate passed 113 unit/integration tests with no local skips, all 24 browser tests, and the installed-package smoke gate. Platform results are recorded separately below.
+Strict TypeScript checking and the production build pass. The candidate passed 119 unit/integration tests with no local skips, all 24 browser tests, and the installed-package smoke gate. Platform results are recorded separately below.
 
 New domain and service tests cover typed token aliases, missing/circular references, font declarations and Unicode subsets, immutable versions/digests, explicit application mappings, historical component provenance, editable slots, guarded undo, default pins and restart persistence. Existing operation/concurrency, delayed-response editing, caret, crash-recovery and export regressions continue to run.
 
@@ -43,12 +43,12 @@ Both hosts ran against a clean installed 0.2.0 candidate using original generic 
 
 Both described the cream page, green card, cream serif/sans text and three peach upright triangle glyphs from the custom OTF. Both reported loaded Lora 700, Inter 400 and Studio Outline 400 faces, with no overflow, font warnings or system-check findings. Receiving an image envelope alone was not counted as image inspection.
 
-Independent checks afterward verified each revision-3 saved document, revision-2 preview, pinned snapshot/default identity, four native elements, edited body text, anchored comment, exact font bytes and portable-system reimport in a fresh asset directory. Both workspace services were stopped. The tested host candidate tarball’s SHA-256 was `1623db0a43d6d26dea05d3fcbf636b7e1c667e95cceb20430a1c7a6468a33d0a`; final source subsequently tightened oversized CSS token/alias bounds, covered by the complete local and installed-package gates above.
+Independent checks afterward verified each revision-3 saved document, revision-2 preview, pinned snapshot/default identity, four native elements, edited body text, anchored comment, exact font bytes and portable-system reimport in a fresh asset directory. Both workspace services were stopped. The tested host candidate tarball’s SHA-256 was `1623db0a43d6d26dea05d3fcbf636b7e1c667e95cceb20430a1c7a6468a33d0a`; final source subsequently tightened oversized CSS token/alias bounds and library file-identity checks, covered by the complete local and installed-package gates above.
 
 The initial host run exposed inherited/default line-height disagreement and a flattened tool-schema description that left Codex without a clear operation example. The importer now explicitly records its estimated line height, and the tool description includes a valid edit example; both real hosts were repeated successfully with the original source fixture and prompt. Previous 0.1.1 checks remain historical evidence in the linked report. Host auth/session logs stay in ignored private artifacts and are not distributed. Claude Code host success does not establish a genuine Claude Design account migration.
 
 ## Platform matrix
 
-The release uses the existing clean GitHub-hosted Ubuntu/macOS/Windows matrix with Node 22.12.0 and 24. Each job runs checking, build, unit/integration tests, all browser tests and the installed-package gate. PDF/PNG coverage cannot silently skip when the export browser is missing. Windows omits privileged file-symlink cases while directory-junction asset boundary checks still run.
+The release uses the existing clean GitHub-hosted Ubuntu/macOS/Windows matrix with Node 22.12.0 and 24. Each job runs checking, build, unit/integration tests, all browser tests and the installed-package gate. PDF/PNG coverage cannot silently skip when the export browser is missing. Windows omits privileged file-symlink cases while directory-junction asset boundary checks still run. The first 0.2.0 matrix exposed a Windows/Node 22 mismatch between path and descriptor identity metadata. Library reads now retain precise BigInt identities, compare Windows volume/file IDs between handles, recheck the path, and bound reads to the verified size. Six additional regressions cover replacement, symlink, volume, precision and growth cases.
 
 Local development runs on macOS arm64 / Node 26.5.0. Firefox, Safari, native operating-system IME candidate windows, unsupported writing systems, remote-only hosts, network filesystems and other processor/OS combinations remain unverified. Chromium composition lifecycle events are automated; unsaved drafts are not persisted after closing the tab.

@@ -68,23 +68,76 @@ export class DesignSystemLibrary {
   }
   private readFile(file: string) {
     safeDirectory(this.directory);
-    let stat: fs.Stats;
+    let stat: fs.BigIntStats;
     try {
-      stat = fs.lstatSync(file);
+      stat = fs.lstatSync(file, { bigint: true });
     } catch {
       return error("Design system version not found.", 404);
     }
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 16 * 1024 * 1024)
+    const maxBytes = 16 * 1024 * 1024;
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > BigInt(maxBytes))
       error("Invalid design system library file.");
-    const fd = fs.openSync(
-      file,
-      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
-    );
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+    const fd = fs.openSync(file, flags);
     try {
-      const current = fs.fstatSync(fd);
-      if (current.ino !== stat.ino || current.dev !== stat.dev)
+      const current = fs.fstatSync(fd, { bigint: true });
+      if (
+        !current.isFile() ||
+        current.size > BigInt(maxBytes) ||
+        current.size !== stat.size ||
+        current.ino !== stat.ino ||
+        (process.platform !== "win32" && current.dev !== stat.dev)
+      )
         error("Design system file changed during read.");
-      return JSON.parse(fs.readFileSync(fd, "utf8"));
+      if (process.platform === "win32") {
+        // Windows path stats can omit/change the volume serial reported by
+        // handle stats. Compare full device/inode identities from two handles;
+        // keep separate path checks before/after, including symlink rejection.
+        const guard = fs.openSync(file, flags);
+        try {
+          const candidate = fs.fstatSync(guard, { bigint: true });
+          if (
+            !candidate.isFile() ||
+            candidate.dev !== current.dev ||
+            candidate.ino !== current.ino ||
+            candidate.size !== current.size
+          )
+            error("Design system file changed during read.");
+        } finally {
+          fs.closeSync(guard);
+        }
+      }
+      // Read only the verified size plus one growth-detection byte, even if
+      // another process keeps appending after the descriptor size check.
+      const data = Buffer.alloc(Number(current.size) + 1);
+      let length = 0;
+      while (length < data.length) {
+        const read = fs.readSync(
+          fd,
+          data,
+          length,
+          data.length - length,
+          length,
+        );
+        if (!read) break;
+        length += read;
+      }
+      const completed = fs.fstatSync(fd, { bigint: true });
+      const after = fs.lstatSync(file, { bigint: true });
+      safeDirectory(this.directory);
+      if (
+        length !== Number(current.size) ||
+        completed.size !== current.size ||
+        completed.mtimeNs !== current.mtimeNs ||
+        completed.ctimeNs !== current.ctimeNs ||
+        after.isSymbolicLink() ||
+        !after.isFile() ||
+        after.dev !== stat.dev ||
+        after.ino !== stat.ino ||
+        after.size !== stat.size
+      )
+        error("Design system file changed during read.");
+      return JSON.parse(data.subarray(0, length).toString("utf8"));
     } finally {
       fs.closeSync(fd);
     }
