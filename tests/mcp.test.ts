@@ -61,6 +61,19 @@ test("actual stdio process lists tools, creates and edits; EOF preserves shared 
       },
     });
     assert.notEqual(changed.isError, true, JSON.stringify(changed));
+    // The SDK default 10 MiB input buffer is smaller than Studio's bundle
+    // limit. An invalid larger request must fail validation without severing
+    // the connection, leaving the next ordinary read available.
+    const largeInvalid = await client.callTool({
+      name: "project_import",
+      arguments: { data: "A".repeat(11 * 1024 * 1024) },
+    });
+    assert.equal(largeInvalid.isError, true);
+    const stillConnected = await client.callTool({
+      name: "document_read",
+      arguments: { documentId: parsed.documentId },
+    });
+    assert.notEqual(stillConnected.isError, true);
     await client.close();
     const d = readDescriptor(root)!;
     assert.ok(d);

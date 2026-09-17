@@ -12,6 +12,9 @@ Run `mcp-visual-design-studio doctor --workspace "your workspace"` first. It rep
 | Revision conflict | Read current document again, compare the intended fields and submit a new targeted batch. Do not replay blindly. |
 | Undo conflict | Later work overlaps that operation. Undo conflicting later operations first, or apply a targeted edit. Use a variation before snapshot restore. |
 | Text conflict | The local draft remains visible. Choose Keep mine to explicitly save it, or Use saved to discard it. |
+| Element or page deleted while editing | The retained-draft card keeps the unsaved text. Copy it, recover it as a new text element on a remaining page, or explicitly discard it. Keep the tab open until the draft is recovered or copied. |
+| Formatting after a text edit | Unchanged text keeps its run formatting and links; newly typed text uses base typography. Select words and use B/I/U to format them. Very large replacements can reset formatting inside the replaced region. |
+| Pending changes cancelled | A prior save failed, an agent changed the document while edits waited, or the selected design changed. Inspect the saved state and submit the intended edit again; Studio does not replay ambiguous writes automatically. |
 | Text clipped in export | Inspect the returned overflow diagnostics. Increase bounds or reduce type size, render again, then export. |
 | Missing glyphs | Fonts cover Latin/Latin Extended. Unsupported writing systems need fonts that this release does not yet import. |
 | Service keeps running after host closes | This preserves browsers and other agents. Use `stop` when finished. |

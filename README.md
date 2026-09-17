@@ -68,7 +68,7 @@ Browser comments **do not wake an idle agent**. Ask the connected host to read t
 - Positioned elements and stack/grid groups; selection, drag, resize, keyboard nudge, align, duplicate, delete and layer ordering.
 - Reusable local brand kits: colors, bundled fonts, logos and structured components.
 - Element comments, selection context, live browser/agent synchronization, retained text drafts and explicit conflict resolution.
-- Durable revision history, guarded operation undo/redo, named snapshots and side-by-side editable variations.
+- Durable revision history, guarded operation undo/redo, named snapshots and side-by-side variation previews.
 - PDF, PNG, self-contained HTML, and portable editable `.vds.json` project bundles. Exports use a requested saved revision, never an in-flight document.
 
 The editor retains native text and structured elements. Examples contain no flattened design artwork. The first release does not include cloud accounts, remote multiplayer, animation, advanced vector tools, arbitrary fonts, office-file reconstruction or built-in model chat.

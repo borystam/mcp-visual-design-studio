@@ -72,12 +72,14 @@ async function main() {
     const { browserHealth } = await import("./export/index.js");
     const root = workspacePath(workspace);
     const d = readDescriptor(root);
+    const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
     console.log(
       JSON.stringify(
         {
           version: VERSION,
           node: process.version,
-          supportedNode: Number(process.versions.node.split(".")[0]) >= 22,
+          supportedNode:
+            nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 12),
           workspace: root,
           service: d ? await verifyService(d, root) : false,
           exportBrowser: await browserHealth(),

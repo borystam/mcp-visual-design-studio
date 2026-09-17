@@ -1702,3 +1702,33 @@ select {
   outline: 1px solid #969d89;
   outline-offset: 3px;
 }
+.draft-recovery {
+  margin: 14px;
+  padding: 13px;
+  border: 1px solid #e1c18f;
+  background: #fff5e4;
+  border-radius: 6px;
+  color: #826740;
+}
+.draft-recovery > strong {
+  font-size: 11px;
+}
+.draft-recovery p {
+  font-size: 10px;
+  line-height: 1.6;
+}
+.draft-recovery textarea {
+  font-size: 11px;
+  min-height: 105px;
+  background: #fffdf8;
+}
+.draft-recovery small {
+  display: block;
+  font-size: 9px;
+  line-height: 1.6;
+  margin-top: 10px;
+  color: #a18a68;
+}
+.draft-recovery .button {
+  font-size: 10px;
+}

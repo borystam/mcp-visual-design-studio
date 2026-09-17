@@ -20,7 +20,7 @@ Primary reference: [Codex MCP configuration](https://developers.openai.com/codex
 claude mcp add --transport stdio visual-design-studio -- mcp-visual-design-studio mcp
 ```
 
-For hosts using a JSON `mcpServers` configuration, use the README example. A desktop host may require an absolute executable path. The host owns tool approval and model/image support; Studio does not bypass those policies. A remote-only host cannot reach a server on your local stdio without a supported local bridge, which is outside this release.
+For hosts using a JSON `mcpServers` configuration, use the README example. A desktop host may require an absolute executable path. If a Windows host cannot launch the npm `.cmd` shim, use `node` as the command and the absolute `mcp-visual-design-studio/dist/cli.js` path under the directory returned by `npm root -g` as its first argument, followed by `mcp`. The host owns tool approval and model/image support; Studio does not bypass those policies. A remote-only host cannot reach a server on your local stdio without a supported local bridge, which is outside this release.
 
 ## Platforms
 

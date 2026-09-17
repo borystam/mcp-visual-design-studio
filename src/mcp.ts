@@ -1,5 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import {
+  serveStdio,
+  StdioServerTransport,
+} from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { BrandKitSchema, findElement, type Document } from "./domain/model.js";
 import { BatchSchema } from "./domain/operations.js";
@@ -22,7 +25,14 @@ export async function startMcp(workspace?: string): Promise<void> {
   const disconnected = new AbortController();
   const handle = serveStdio(
     () => makeMcpServer(descriptor, disconnected.signal),
-    { onerror: (e) => process.stderr.write(`Studio MCP: ${e.message}\n`) },
+    {
+      // A 100 MiB portable bundle expands to ~134 MiB as base64. Keep a
+      // bounded protocol buffer large enough for the advertised import limit.
+      transport: new StdioServerTransport(process.stdin, process.stdout, {
+        maxBufferSize: 150 * 1024 * 1024,
+      }),
+      onerror: (e) => process.stderr.write(`Studio MCP: ${e.message}\n`),
+    },
   );
   const close = () => {
     disconnected.abort();

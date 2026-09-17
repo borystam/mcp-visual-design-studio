@@ -68,20 +68,9 @@ export function atomicJson(file: string, value: unknown): void {
 export function workspaceId(root: string): string {
   const file = path.join(root, "workspace.json");
   if (!fs.existsSync(file)) {
-    try {
-      const fd = fs.openSync(file, "wx", 0o600);
-      try {
-        fs.writeFileSync(
-          fd,
-          JSON.stringify({ id: randomUUID(), schemaVersion: 1 }),
-        );
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
+    // The service owns the workspace before first initialization. Publish the
+    // identity atomically too, so a crash cannot leave a half-written identity.
+    atomicJson(file, { id: randomUUID(), schemaVersion: 1 });
   }
   const data = JSON.parse(fs.readFileSync(file, "utf8"));
   if (

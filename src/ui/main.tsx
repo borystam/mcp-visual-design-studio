@@ -14,6 +14,7 @@ import {
 } from "../domain/templates.js";
 import "./style.css";
 import { brandOperations } from "../domain/brand.js";
+import { preserveTextRuns } from "./drafts.js";
 
 import type {
   Document as Doc,
@@ -44,7 +45,39 @@ type Snapshot = {
   revision: number;
   createdAt: string;
 };
-type Draft = { base: string; text: string; remote?: string };
+type Draft = {
+  base: string;
+  text: string;
+  remote?: string;
+  documentId: string;
+  elementId: string;
+  pageId: string;
+  source: Item;
+  deleted?: boolean;
+  editVersion: number;
+};
+const draftKey = (documentId: string, elementId: string) =>
+  `${documentId}:${elementId}`;
+function createDraft(
+  item: Item,
+  documentId: string,
+  pageId: string,
+  editVersion = 0,
+): Draft {
+  return {
+    base: textOf(item),
+    text: textOf(item),
+    editVersion,
+    documentId,
+    elementId: item.id,
+    pageId,
+    source: structuredClone(item),
+  };
+}
+function draftRuns(item: Item, draft: Draft): TextRun[] {
+  const source = textOf(item) === draft.base ? item : draft.source;
+  return preserveTextRuns(textOf(source), draft.text, source.runs);
+}
 const uid = () => crypto.randomUUID();
 const fresh = (item: Item): Item => ({
   ...structuredClone(item),
@@ -332,7 +365,6 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace>();
   const [doc, setDoc] = useState<Doc>();
   const docRef = useRef<Doc | undefined>(undefined);
-  docRef.current = doc;
   const [pageId, setPageId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [tab, setTab] = useState<"design" | "brand" | "comments" | "history">(
@@ -340,12 +372,20 @@ function App() {
   );
   const [library, setLibrary] = useState<"pages" | "elements">("pages");
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const announcedDeletedDrafts = useRef(new Set<string>());
+  const pendingDraftWrites = useRef(
+    new Map<string, { token: string; text: string; version: number }[]>(),
+  );
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
   const textRef = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const [notice, setNotice] = useState<{ text: string; error?: boolean }>();
   const [busy, setBusy] = useState(false);
+  const mutationTail = useRef<Promise<unknown>>(Promise.resolve());
+  const mutationGeneration = useRef(0);
+  const pendingMutations = useRef(0);
+  const localRevisions = useRef(new Map<string, Set<number>>());
   const [connected, setConnected] = useState(false);
   const [modal, setModal] = useState<"new" | "export" | "compare" | null>(null);
   const [newName, setNewName] = useState("Untitled design");
@@ -384,7 +424,8 @@ function App() {
   const page = doc?.pages.find((p) => p.id === pageId) ?? doc?.pages[0];
   const info = locate(doc, selected[0]);
   const item = info?.item;
-  const draft = item ? drafts[item.id] : undefined;
+  const activeDraftKey = doc && item ? draftKey(doc.id, item.id) : undefined;
+  const draft = activeDraftKey ? drafts[activeDraftKey] : undefined;
   const dirty = !!draft && draft.text !== draft.base;
   const error = useCallback((e: unknown) => {
     setNotice({
@@ -452,6 +493,15 @@ function App() {
         : w,
     );
   }, []);
+  function acceptMutation(next: Doc) {
+    let revisions = localRevisions.current.get(next.id);
+    if (!revisions) {
+      revisions = new Set<number>();
+      localRevisions.current.set(next.id, revisions);
+    }
+    revisions.add(next.revision);
+    accept(next);
+  }
   const refresh = useCallback(
     async (id?: string) => {
       const current = id ?? docRef.current?.id;
@@ -530,19 +580,61 @@ function App() {
   useEffect(() => {
     if (!doc) return;
     setDrafts((old) => {
-      let changed = false;
       const next = { ...old };
-      for (const [id, d] of Object.entries(old)) {
-        const current = locate(doc, id)?.item;
-        if (!current) continue;
-        const remote = textOf(current);
-        if (d.text === d.base) {
-          if (remote !== d.base) {
-            next[id] = { base: remote, text: remote };
+      let changed = false;
+      for (const [id, draft] of Object.entries(old)) {
+        if (draft.documentId !== doc.id) continue;
+        const location = locate(doc, draft.elementId),
+          current = location?.item;
+        if (!current) {
+          if (draft.text === draft.base) {
+            delete next[id];
+            changed = true;
+          } else if (!draft.deleted) {
+            next[id] = { ...draft, deleted: true };
             changed = true;
           }
-        } else if (remote !== d.base && remote !== d.remote) {
-          next[id] = { ...d, remote };
+          continue;
+        }
+        const remote = textOf(current);
+        const pending = pendingDraftWrites.current.get(id) ?? [];
+        const newerTyping = pending.some(
+          (write) => draft.editVersion > write.version,
+        );
+        const ownSaved = pending.find((write) => write.text === remote);
+        if (ownSaved && draft.editVersion > ownSaved.version) {
+          next[id] = {
+            ...createDraft(
+              current,
+              doc.id,
+              location!.page.id,
+              draft.editVersion,
+            ),
+            text: draft.text,
+          };
+          changed = true;
+        } else if (
+          (draft.text === draft.base && !newerTyping) ||
+          draft.text === remote
+        ) {
+          next[id] = createDraft(
+            current,
+            doc.id,
+            location!.page.id,
+            draft.editVersion,
+          );
+          changed = true;
+        } else if (remote !== draft.base) {
+          next[id] = { ...draft, remote, deleted: false };
+          changed = true;
+        } else {
+          next[id] = {
+            ...draft,
+            source: structuredClone(current),
+            pageId: location!.page.id,
+            remote: undefined,
+            deleted: false,
+          };
           changed = true;
         }
       }
@@ -553,12 +645,35 @@ function App() {
       setPageId(doc.pages[0]?.id ?? "");
   }, [doc]);
   useEffect(() => {
-    if (item?.type === "text" && !draftsRef.current[item.id])
+    if (
+      item?.type === "text" &&
+      doc &&
+      info &&
+      !draftsRef.current[draftKey(doc.id, item.id)]
+    )
       setDrafts((ds) => ({
         ...ds,
-        [item.id]: { base: textOf(item), text: textOf(item) },
+        [draftKey(doc.id, item.id)]: createDraft(item, doc.id, info.page.id),
       }));
-  }, [item?.id, item?.type]);
+  }, [item?.id, item?.type, doc?.id]);
+  useEffect(() => {
+    const removed = Object.entries(drafts).filter(
+      ([, draft]) =>
+        draft.documentId === doc?.id &&
+        draft.deleted &&
+        draft.text !== draft.base,
+    );
+    if (removed.some(([id]) => !announcedDeletedDrafts.current.has(id))) {
+      setNotice({
+        text: "An edited element was deleted. Your unsaved draft is retained in the inspector.",
+        error: true,
+      });
+      document
+        .querySelector(".draft-recovery")
+        ?.scrollIntoView({ block: "start" });
+    }
+    announcedDeletedDrafts.current = new Set(removed.map(([id]) => id));
+  }, [drafts, doc?.id]);
   const loadHistory = useCallback(async () => {
     if (!docRef.current) return;
     const id = docRef.current.id;
@@ -572,27 +687,93 @@ function App() {
   useEffect(() => {
     if (tab === "history") void loadHistory().catch(error);
   }, [tab, doc?.revision, loadHistory, error]);
-  async function apply(operations: unknown[], label = "Changes saved") {
-    const current = docRef.current;
-    if (!current) return;
+  // A browser may receive a server event before the previous HTTP save reply.
+  // Serialize locally initiated writes and choose the revision only when each
+  // write starts. A failed/ambiguous write cancels pending writes; none is replayed.
+  function enqueueMutation<T>(
+    documentId: string,
+    action: (current: Doc) => Promise<T>,
+  ): Promise<T | undefined> {
+    const baseline =
+      doc?.id === documentId ? doc.revision : docRef.current?.revision;
+    const generation = mutationGeneration.current;
+    pendingMutations.current++;
     setBusy(true);
-    try {
-      const result = await api(`/api/documents/${current.id}/operations`, {
-        operationId: uid(),
-        actor,
-        expectedRevision: current.revision,
-        operations,
-      });
-      accept(result.document);
-      setNotice({ text: label });
-      return result.document as Doc;
-    } catch (e) {
-      error(e);
-      void refresh().catch(error);
-      return undefined;
-    } finally {
-      setBusy(false);
-    }
+    const task = mutationTail.current.then(async () => {
+      if (generation !== mutationGeneration.current) {
+        error(
+          new Error(
+            "A prior save failed. Pending changes were cancelled; inspect the saved document before trying again.",
+          ),
+        );
+        return undefined;
+      }
+      const current = docRef.current;
+      if (!current || current.id !== documentId) {
+        error(
+          new Error(
+            "The document changed before this edit could be saved. Return to the original design and try again.",
+          ),
+        );
+        return undefined;
+      }
+      if (baseline !== undefined && current.revision > baseline) {
+        const acknowledged = localRevisions.current.get(documentId);
+        for (
+          let revision = baseline + 1;
+          revision <= current.revision;
+          revision++
+        ) {
+          if (!acknowledged?.has(revision)) {
+            mutationGeneration.current++;
+            error(
+              new Error(
+                "The document changed elsewhere while this edit was waiting. Pending changes were cancelled; review the saved state before trying again.",
+              ),
+            );
+            return undefined;
+          }
+        }
+      }
+      try {
+        return await action(current);
+      } catch (e) {
+        mutationGeneration.current++;
+        error(e);
+        await refresh(documentId).catch(error);
+        return undefined;
+      }
+    });
+    mutationTail.current = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task.finally(() => {
+      pendingMutations.current--;
+      setBusy(pendingMutations.current > 0);
+    });
+  }
+  async function writeOperations(
+    current: Doc,
+    operations: unknown[],
+    label = "Changes saved",
+  ): Promise<Doc> {
+    const result = await api(`/api/documents/${current.id}/operations`, {
+      operationId: uid(),
+      actor,
+      expectedRevision: current.revision,
+      operations,
+    });
+    acceptMutation(result.document);
+    setNotice({ text: label });
+    return result.document;
+  }
+  function apply(operations: unknown[], label = "Changes saved") {
+    const current = docRef.current;
+    if (!current) return Promise.resolve(undefined);
+    return enqueueMutation(current.id, (current) =>
+      writeOperations(current, operations, label),
+    );
   }
   const patch = (patch: Partial<Item>, id = item?.id) =>
     id
@@ -608,6 +789,69 @@ function App() {
         pageId: p,
       }).catch(error);
   }
+  function beginDraftWrite(key: string, text: string, version: number) {
+    const token = uid();
+    pendingDraftWrites.current.set(key, [
+      ...(pendingDraftWrites.current.get(key) ?? []),
+      { token, text, version },
+    ]);
+    return () => {
+      const remaining = (pendingDraftWrites.current.get(key) ?? []).filter(
+        (write) => write.token !== token,
+      );
+      if (remaining.length) pendingDraftWrites.current.set(key, remaining);
+      else pendingDraftWrites.current.delete(key);
+    };
+  }
+  function acknowledgeDraft(
+    saved: Doc,
+    elementId: string,
+    submittedText: string,
+    submittedVersion: number,
+  ) {
+    const location = locate(saved, elementId);
+    if (!location) return;
+    const key = draftKey(saved.id, elementId);
+    const live =
+      docRef.current?.id === saved.id
+        ? locate(docRef.current, elementId)
+        : undefined;
+    setDrafts((ds) => {
+      const local = ds[key];
+      if (!local) return ds;
+      if (local.deleted && local.text === submittedText) return ds;
+      if (local.editVersion <= submittedVersion)
+        return {
+          ...ds,
+          [key]: createDraft(
+            live?.item ?? location.item,
+            saved.id,
+            live?.page.id ?? location.page.id,
+            local.editVersion,
+          ),
+        };
+      const remote = live ? textOf(live.item) : undefined;
+      return {
+        ...ds,
+        [key]: {
+          ...createDraft(
+            location.item,
+            saved.id,
+            location.page.id,
+            local.editVersion,
+          ),
+          text: local.text,
+          deleted: local.deleted,
+          remote:
+            remote !== undefined &&
+            remote !== submittedText &&
+            remote !== local.text
+              ? remote
+              : undefined,
+        },
+      };
+    });
+  }
   async function saveText(force = false) {
     if (!item || !draft) return;
     if (draft.remote !== undefined && !force) {
@@ -618,15 +862,71 @@ function App() {
       return;
     }
     if (composing.current) return;
-    const saved = await patch({ text: draft.text, runs: [] });
-    if (saved)
-      setDrafts((ds) => ({
-        ...ds,
-        [item.id]: { base: draft.text, text: draft.text },
-      }));
+    const endWrite = beginDraftWrite(
+      draftKey(draft.documentId, item.id),
+      draft.text,
+      draft.editVersion,
+    );
+    const saved = await patch({
+      text: draft.text,
+      runs: draftRuns(item, draft),
+    });
+    if (saved) acknowledgeDraft(saved, item.id, draft.text, draft.editVersion);
+    endWrite();
+  }
+  function discardDraft(id: string) {
+    setDrafts((ds) => {
+      const next = { ...ds };
+      delete next[id];
+      return next;
+    });
+  }
+  async function copyDraft(draft: Draft) {
+    try {
+      await navigator.clipboard.writeText(draft.text);
+      setNotice({ text: "Retained draft copied" });
+    } catch {
+      error(
+        new Error(
+          "Clipboard access was unavailable. Select the retained text and copy it with your keyboard.",
+        ),
+      );
+    }
+  }
+  async function recoverDraft(id: string, draft: Draft) {
+    const saved = await enqueueMutation(draft.documentId, async (current) => {
+      const target =
+        current.pages.find((p) => p.id === draft.pageId) ??
+        current.pages.find((p) => p.id === pageId) ??
+        current.pages[0];
+      const width = Math.min(draft.source.width, target.width),
+        height = Math.min(draft.source.height, target.height);
+      const element: Item = {
+        ...structuredClone(draft.source),
+        id: uid(),
+        name: `${draft.source.name.slice(0, 180)} · Recovered`,
+        text: draft.text,
+        runs: draftRuns(draft.source, draft),
+        width,
+        height,
+        x: Math.max(0, Math.min(draft.source.x, target.width - width)),
+        y: Math.max(0, Math.min(draft.source.y, target.height - height)),
+      };
+      const result = await writeOperations(
+        current,
+        [{ type: "add_element", pageId: target.id, element }],
+        "Draft recovered as a new text element",
+      );
+      discardDraft(id);
+      select([element.id], target.id);
+      setTab("design");
+      return result;
+    });
+    return saved;
   }
   async function formatText(kind: "bold" | "italic" | "underline") {
     if (!item || item.type !== "text" || composing.current) return;
+    const priorFocus = document.activeElement;
     const start = textRef.current?.selectionStart ?? 0;
     const end = textRef.current?.selectionEnd ?? 0;
     if (start === end) {
@@ -654,8 +954,8 @@ function App() {
       return;
     }
     const text = draft?.text ?? textOf(item);
-    const source: TextRun[] =
-      item.runs?.length && text === textOf(item) ? item.runs : [{ text }];
+    const preserved = draft ? draftRuns(item, draft) : item.runs;
+    const source: TextRun[] = preserved?.length ? preserved : [{ text }];
     let offset = 0;
     const runs: TextRun[] = [];
     for (const run of source) {
@@ -685,34 +985,40 @@ function App() {
       offset += run.text.length;
       return overlaps ? { ...run, [kind]: enable } : run;
     });
+    const version = draft?.editVersion ?? 0;
+    const endWrite = beginDraftWrite(draftKey(doc!.id, item.id), text, version);
     const saved = await patch({ text, runs: formatted });
     if (saved) {
-      setDrafts((ds) => ({ ...ds, [item.id]: { base: text, text } }));
+      const unchanged =
+        draftsRef.current[draftKey(saved.id, item.id)]?.text === text;
+      acknowledgeDraft(saved, item.id, text, version);
       requestAnimationFrame(() => {
+        if (!unchanged || textRef.current?.value !== text) return;
+        if (
+          document.activeElement !== priorFocus &&
+          document.activeElement !== textRef.current
+        )
+          return;
         textRef.current?.focus();
         textRef.current?.setSelectionRange(start, end);
       });
     }
+    endWrite();
   }
   async function loadBrand(brand: Brand) {
-    const current = docRef.current;
-    if (!current) return;
-    setBusy(true);
-    try {
+    const documentId = docRef.current?.id;
+    if (!documentId) return;
+    await enqueueMutation(documentId, async (current) => {
       const result = await api(`/api/documents/${current.id}/brand`, {
         brandId: brand.id,
         operationId: uid(),
         actor,
         expectedRevision: current.revision,
       });
-      accept(result.document);
+      acceptMutation(result.document);
       setNotice({ text: "Brand kit loaded" });
-    } catch (e) {
-      error(e);
-      void refresh().catch(error);
-    } finally {
-      setBusy(false);
-    }
+      return result.document;
+    });
   }
   function add(type: Item["type"]) {
     if (!page) return;
@@ -905,11 +1211,13 @@ function App() {
       select(children.map((e) => e.id));
   }
   async function upload(file: File) {
-    if (!docRef.current || !page) return;
-    setBusy(true);
-    try {
+    const documentId = docRef.current?.id;
+    if (!documentId || !page) return;
+    const targetPage = page,
+      mode = uploadMode.current,
+      targetItem = item;
+    await enqueueMutation(documentId, async (current) => {
       const data = await base64(file);
-      const current = docRef.current;
       const result = await api(`/api/documents/${current.id}/assets`, {
         name: file.name,
         data,
@@ -917,10 +1225,9 @@ function App() {
         operationId: uid(),
         actor,
       });
-      accept(result.document);
-      docRef.current = result.document;
-      if (uploadMode.current === "logo") {
-        await apply([
+      acceptMutation(result.document);
+      if (mode === "logo")
+        return writeOperations(result.document, [
           {
             type: "set_document",
             patch: {
@@ -928,34 +1235,33 @@ function App() {
             },
           },
         ]);
-      } else if (uploadMode.current === "replace" && item?.type === "image") {
-        await patch({ assetId: result.asset.id });
-      } else {
-        const image: Item = {
-          id: uid(),
-          type: "image",
-          name: file.name,
-          x: 64,
-          y: 80,
-          width: Math.min(360, page.width - 128),
-          height: 240,
-          style: { borderRadius: 4 },
-          assetId: result.asset.id,
-          fit: "cover",
-          crop: { x: 50, y: 50 },
-        };
-        if (
-          await apply([
-            { type: "add_element", pageId: page.id, element: image },
-          ])
-        )
-          select([image.id]);
-      }
-    } catch (e) {
-      error(e);
-    } finally {
-      setBusy(false);
-    }
+      if (mode === "replace" && targetItem?.type === "image")
+        return writeOperations(result.document, [
+          {
+            type: "update_element",
+            elementId: targetItem.id,
+            patch: { assetId: result.asset.id },
+          },
+        ]);
+      const image: Item = {
+        id: uid(),
+        type: "image",
+        name: file.name,
+        x: 64,
+        y: 80,
+        width: Math.min(360, targetPage.width - 128),
+        height: 240,
+        style: { borderRadius: 4 },
+        assetId: result.asset.id,
+        fit: "cover",
+        crop: { x: 50, y: 50 },
+      };
+      const saved = await writeOperations(result.document, [
+        { type: "add_element", pageId: targetPage.id, element: image },
+      ]);
+      if (docRef.current?.id === documentId) select([image.id], targetPage.id);
+      return saved;
+    });
   }
   async function create() {
     setBusy(true);
@@ -975,26 +1281,23 @@ function App() {
     }
   }
   async function undo(entry: History) {
-    if (!doc) return;
-    setBusy(true);
-    try {
-      const result = await api(`/api/documents/${doc.id}/undo`, {
+    const documentId = docRef.current?.id;
+    if (!documentId) return;
+    await enqueueMutation(documentId, async (current) => {
+      const result = await api(`/api/documents/${current.id}/undo`, {
         operationId: uid(),
         actor,
-        expectedRevision: doc.revision,
+        expectedRevision: current.revision,
         targetOperationId: entry.operationId,
       });
-      accept(result.document);
+      acceptMutation(result.document);
       setNotice({
         text: entry.undoOf
           ? "Change redone"
           : "Change undone; other edits preserved",
       });
-    } catch (e) {
-      error(e);
-    } finally {
-      setBusy(false);
-    }
+      return result.document;
+    });
   }
   async function historyAction(action: "undo" | "redo") {
     try {
@@ -1052,32 +1355,32 @@ function App() {
     }
   }
   async function snapshot() {
-    if (!doc) return;
-    try {
-      await api(`/api/documents/${doc.id}/snapshots`, {
+    const documentId = docRef.current?.id;
+    if (!documentId) return;
+    await enqueueMutation(documentId, async (current) => {
+      await api(`/api/documents/${current.id}/snapshots`, {
         name: snapshotName.trim() || `Checkpoint ${snapshots.length + 1}`,
       });
       setSnapshotName("");
       await loadHistory();
       setNotice({ text: "Snapshot saved" });
-    } catch (e) {
-      error(e);
-    }
+      return current;
+    });
   }
   async function restore(s: Snapshot) {
-    if (!doc) return;
-    try {
-      const result = await api(`/api/documents/${doc.id}/restore`, {
+    const documentId = docRef.current?.id;
+    if (!documentId) return;
+    await enqueueMutation(documentId, async (current) => {
+      const result = await api(`/api/documents/${current.id}/restore`, {
         snapshotId: s.id,
         operationId: uid(),
         actor,
-        expectedRevision: doc.revision,
+        expectedRevision: current.revision,
       });
-      accept(result.document);
+      acceptMutation(result.document);
       setNotice({ text: `Restored ${s.name} as a new revision` });
-    } catch (e) {
-      error(e);
-    }
+      return result.document;
+    });
   }
   function pointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0 || !page) return;
@@ -1138,7 +1441,7 @@ function App() {
           ...page,
           elements: replaceItem(page.elements, item.id, {
             text: draft!.text,
-            runs: [],
+            runs: draftRuns(item, draft!),
           }),
         }
       : page;
@@ -1844,6 +2147,51 @@ function App() {
           </footer>
         </section>
         <aside className="right-panel">
+          {Object.entries(drafts)
+            .filter(
+              ([, draft]) =>
+                draft.documentId === doc?.id &&
+                draft.deleted &&
+                draft.text !== draft.base,
+            )
+            .map(([id, retained]) => (
+              <section
+                className="draft-recovery"
+                role="alert"
+                key={id}
+                data-testid="deleted-draft"
+              >
+                <strong>Element deleted · draft retained</strong>
+                <p>
+                  “{retained.source.name}” was removed while you were editing.
+                  Your unsaved text is safe here.
+                </p>
+                <textarea
+                  readOnly
+                  aria-label={`Retained draft from ${retained.source.name}`}
+                  value={retained.text}
+                />
+                <div className="row-actions">
+                  <Button onClick={() => void copyDraft(retained)}>
+                    Copy draft
+                  </Button>
+                  <Button onClick={() => discardDraft(id)}>
+                    Discard draft
+                  </Button>
+                </div>
+                <Button
+                  className="subtle-primary full"
+                  disabled={busy}
+                  onClick={() => void recoverDraft(id, retained)}
+                >
+                  Recover as new text
+                </Button>
+                <small>
+                  Recovery creates a new element on the original page, or the
+                  current page if it was removed.
+                </small>
+              </section>
+            ))}
           {tab === "design" ? (
             <>
               <div className="inspector-title">
@@ -1942,9 +2290,13 @@ function App() {
                         onChange={(e) =>
                           setDrafts((ds) => ({
                             ...ds,
-                            [item.id]: {
-                              ...(ds[item.id] ?? { base: textOf(item) }),
+                            [draftKey(doc!.id, item.id)]: {
+                              ...(ds[draftKey(doc!.id, item.id)] ??
+                                createDraft(item, doc!.id, info!.page.id)),
                               text: e.target.value,
+                              editVersion:
+                                (ds[draftKey(doc!.id, item.id)]?.editVersion ??
+                                  0) + 1,
                             },
                           }))
                         }
@@ -1980,10 +2332,12 @@ function App() {
                               onClick={() =>
                                 setDrafts((ds) => ({
                                   ...ds,
-                                  [item.id]: {
-                                    base: draft.remote!,
-                                    text: draft.remote!,
-                                  },
+                                  [draftKey(doc!.id, item.id)]: createDraft(
+                                    item,
+                                    doc!.id,
+                                    info!.page.id,
+                                    draft.editVersion + 1,
+                                  ),
                                 }))
                               }
                             >
@@ -3072,7 +3426,7 @@ function App() {
                     {
                       id: "png",
                       label: "PNG images",
-                      note: "Crisp images, one for each page",
+                      note: "A vertical contact sheet of all pages",
                     },
                     {
                       id: "html",

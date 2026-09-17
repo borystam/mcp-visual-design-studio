@@ -196,7 +196,7 @@ function assertSafePackage(files) {
       const text = body.toString("utf8");
       assert.doesNotMatch(
         text,
-        /\/Users\/[a-zA-Z][^\s"'<>]+|C:\\\\Users\\\\|\/home\/(?:runner|borys)\//,
+        /\/Users\/[a-zA-Z][^\s"'<>]+|C:\\\\Users\\\\|\/home\/[A-Za-z][A-Za-z0-9_-]*\//,
         `Machine-specific path in ${name}`,
       );
       assert.doesNotMatch(
@@ -256,6 +256,12 @@ try {
   assert.equal(doctor.version, version);
   assert.equal(doctor.supportedNode, true);
   const browserAvailable = doctor.exportBrowser.ok === true;
+  if (process.env.CI)
+    assert.equal(
+      browserAvailable,
+      true,
+      "The CI release gate must exercise the installed package's PDF, PNG and preview rendering.",
+    );
   console.log(
     `Installed CLI is healthy. Chromium available: ${browserAvailable}.`,
   );

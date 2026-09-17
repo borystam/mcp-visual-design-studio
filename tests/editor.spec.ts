@@ -425,3 +425,532 @@ test("saved brand logo is reusable in another design; template previews remain w
     )
     .toBe(1);
 });
+
+test("overlapping browser edits wait for the prior save response, including image registration", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Queued browser writes");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed!: () => void;
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let operationRequests = 0,
+    assetRequests = 0;
+  await page.route(`**/api/documents/${doc.id}/operations`, async (route) => {
+    operationRequests++;
+    const response = await route.fetch();
+    if (operationRequests === 1) {
+      committed();
+      await held;
+    }
+    await route.fulfill({ response });
+  });
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      request.url().endsWith(`/${doc.id}/assets`)
+    )
+      assetRequests++;
+  });
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page.getByTestId("text-editor").fill(target.text + " queued");
+  await page.getByTestId("save-text").click();
+  await firstCommitted;
+  const link = page.getByRole("textbox", { name: "Link URL", exact: true });
+  await link.fill("https://example.com/queued");
+  await link.press("Enter");
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles({
+      name: "queued.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=",
+        "base64",
+      ),
+    });
+  // Flushing a browser event loop turn proves queued actions cannot send an older revision.
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  expect(operationRequests).toBe(1);
+  expect(assetRequests).toBe(0);
+  release();
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(4);
+  const saved = await current(doc.id);
+  expect(saved.pages[0].elements.find((e) => e.id === target.id)!.href).toBe(
+    "https://example.com/queued",
+  );
+  expect(
+    saved.pages[0].elements.filter((e) => e.type === "image"),
+  ).toHaveLength(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("an ambiguous failed save cancels queued writes without automatically replaying either", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Bounded failed writes");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed!: () => void;
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let requests = 0;
+  await page.route(`**/api/documents/${doc.id}/operations`, async (route) => {
+    requests++;
+    const response = await route.fetch();
+    if (requests === 1) {
+      committed();
+      await held;
+      await route.abort("failed");
+    } else await route.fulfill({ response });
+  });
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page.getByTestId("text-editor").fill(target.text + " committed");
+  await page.getByTestId("save-text").click();
+  await firstCommitted;
+  const link = page.getByRole("textbox", { name: "Link URL", exact: true });
+  await link.fill("https://example.com/not-replayed");
+  await link.press("Enter");
+  release();
+  await expect(page.locator(".toast[role=alert]")).toContainText(
+    "Pending changes were cancelled",
+  );
+  expect(requests).toBe(1);
+  expect((await current(doc.id)).revision).toBe(1);
+  expect(
+    (await current(doc.id)).pages[0].elements.find((e) => e.id === target.id)!
+      .href,
+  ).toBeUndefined();
+});
+
+test("switching designs cancels queued old-document edits and ignores its late save response", async ({
+  page,
+}) => {
+  const first = await setup(page, "Original before switch");
+  const second = await call<Document>("/api/documents", {
+    name: "Destination after switch",
+    template: "blank",
+  });
+  await expect(page.getByTestId("document-select")).toContainText(second.name);
+  const target = first.pages[0].elements.find((e) => e.type === "text")!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed!: () => void;
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let requests = 0;
+  await page.route(`**/api/documents/${first.id}/operations`, async (route) => {
+    requests++;
+    const response = await route.fetch();
+    if (requests === 1) {
+      committed();
+      await held;
+    }
+    await route.fulfill({ response });
+  });
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page.getByTestId("text-editor").fill(target.text + " original save");
+  await page.getByTestId("save-text").click();
+  await firstCommitted;
+  const link = page.getByRole("textbox", { name: "Link URL", exact: true });
+  await link.fill("https://example.com/old-document");
+  await link.press("Enter");
+  await page.getByTestId("document-select").selectOption(second.id);
+  release();
+  await expect(page.getByRole("alert")).toContainText(
+    "The document changed before this edit could be saved",
+  );
+  await expect(page.getByTestId("document-select")).toHaveValue(second.id);
+  expect(requests).toBe(1);
+  expect(
+    (await current(first.id)).pages[0].elements.find((e) => e.id === target.id)!
+      .href,
+  ).toBeUndefined();
+  expect((await current(second.id)).revision).toBe(0);
+});
+
+test("queued browser edits never silently overwrite a new agent revision", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Queued external conflict");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed!: () => void;
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let requests = 0;
+  await page.route(`**/api/documents/${doc.id}/operations`, async (route) => {
+    requests++;
+    const response = await route.fetch();
+    if (requests === 1) {
+      committed();
+      await held;
+    }
+    await route.fulfill({ response });
+  });
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page.getByTestId("text-editor").fill(target.text + " queued");
+  await page.getByTestId("save-text").click();
+  await firstCommitted;
+  const link = page.getByRole("textbox", { name: "Link URL", exact: true });
+  await link.fill("https://example.com/browser");
+  await link.press("Enter");
+  await agent(doc.id, [
+    {
+      type: "update_element",
+      elementId: target.id,
+      patch: { href: "https://example.com/agent" },
+    },
+  ]);
+  await expect(page.getByText("Revision 2", { exact: false })).toBeVisible();
+  release();
+  await expect(page.locator(".toast[role=alert]")).toContainText(
+    "changed elsewhere while this edit was waiting",
+  );
+  expect(requests).toBe(1);
+  expect(
+    (await current(doc.id)).pages[0].elements.find((e) => e.id === target.id)!
+      .href,
+  ).toBe("https://example.com/agent");
+});
+
+test("editing plain text preserves unaffected bold, italic, Unicode and hyperlink runs", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Editable rich text");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  const runs = [
+    { text: "Bold opening, ", bold: true },
+    {
+      text: "linked 😀 words",
+      href: "https://example.com/retained",
+      underline: true,
+    },
+    { text: ", and a quiet ending.", italic: true },
+  ];
+  const original = runs.map((r) => r.text).join("");
+  await agent(doc.id, [
+    {
+      type: "update_element",
+      elementId: target.id,
+      patch: { text: original, runs },
+    },
+  ]);
+  await expect(page.getByText("Revision 1", { exact: false })).toBeVisible();
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  const edited = `New: ${original} Done.`;
+  await page.getByTestId("text-editor").fill(edited);
+  await expect(
+    page
+      .getByTestId("canvas")
+      .getByRole("link", { name: "linked 😀 words", exact: true }),
+  ).toHaveAttribute("href", "https://example.com/retained");
+  await page.getByTestId("save-text").click();
+  await expect
+    .poll(
+      async () =>
+        (await current(doc.id)).pages[0].elements.find(
+          (e) => e.id === target.id,
+        )!.text,
+    )
+    .toBe(edited);
+  const saved = (await current(doc.id)).pages[0].elements.find(
+    (e) => e.id === target.id,
+  )!;
+  expect(saved.runs?.find((r) => r.text === "Bold opening, ")?.bold).toBe(true);
+  expect(saved.runs?.find((r) => r.text === "linked 😀 words")?.href).toBe(
+    "https://example.com/retained",
+  );
+  expect(
+    saved.runs?.find((r) => r.text === ", and a quiet ending.")?.italic,
+  ).toBe(true);
+});
+
+test("deleted dirty text has a visible retained draft that can be recovered or discarded", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Retained deleted draft");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page
+    .getByTestId("text-editor")
+    .fill("This unsaved wording must survive deletion.");
+  await agent(doc.id, [{ type: "delete_element", elementId: target.id }]);
+  const recovery = page.getByTestId("deleted-draft");
+  await expect(recovery).toBeVisible();
+  await expect(recovery.getByRole("textbox")).toHaveValue(
+    "This unsaved wording must survive deletion.",
+  );
+  await page.getByRole("button", { name: "Brand", exact: true }).click();
+  await expect(recovery).toBeVisible();
+  await recovery
+    .getByRole("button", { name: "Recover as new text", exact: true })
+    .click();
+  await expect(recovery).toHaveCount(0);
+  await expect
+    .poll(async () =>
+      (await current(doc.id)).pages[0].elements.some(
+        (e) => e.text === "This unsaved wording must survive deletion.",
+      ),
+    )
+    .toBe(true);
+  const restored = (await current(doc.id)).pages[0].elements.find(
+    (e) => e.text === "This unsaved wording must survive deletion.",
+  )!;
+  expect(restored.id).not.toBe(target.id);
+  await expect(page.getByTestId("text-editor")).toHaveValue(restored.text!);
+  await page
+    .getByTestId("text-editor")
+    .fill("A second local draft to discard.");
+  await agent(doc.id, [{ type: "delete_element", elementId: restored.id }]);
+  await expect(recovery).toBeVisible();
+  await recovery
+    .getByRole("button", { name: "Discard draft", exact: true })
+    .click();
+  await expect(recovery).toHaveCount(0);
+  expect(
+    (await current(doc.id)).pages[0].elements.some(
+      (e) => e.text === "A second local draft to discard.",
+    ),
+  ).toBe(false);
+});
+
+test("draft recovery works when an agent removes the entire edited page", async ({
+  page,
+}) => {
+  const doc = await call<Document>("/api/documents", {
+    name: "Deleted page recovery",
+    template: "brochure",
+  });
+  await page.goto(editorUrl(service.descriptor, doc.id));
+  await page.getByTestId("canvas").waitFor();
+  const sourcePage = doc.pages[1],
+    target = sourcePage.elements.find((e) => e.type === "text")!;
+  await page
+    .getByRole("button", { name: `Select ${sourcePage.name}`, exact: true })
+    .click();
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  await page
+    .getByTestId("text-editor")
+    .fill("Recover me onto the remaining page.");
+  await agent(doc.id, [{ type: "delete_page", pageId: sourcePage.id }]);
+  await page
+    .getByTestId("deleted-draft")
+    .getByRole("button", { name: "Recover as new text", exact: true })
+    .click();
+  await expect(page.getByTestId("deleted-draft")).toHaveCount(0);
+  const saved = await current(doc.id);
+  expect(saved.pages).toHaveLength(2);
+  expect(
+    saved.pages[0].elements.some(
+      (e) => e.text === "Recover me onto the remaining page.",
+    ),
+  ).toBe(true);
+});
+
+async function holdNextOperation(page: Page, documentId: string) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let notify!: () => void;
+  const committed = new Promise<void>((resolve) => {
+    notify = resolve;
+  });
+  let first = true;
+  await page.route(
+    `**/api/documents/${documentId}/operations`,
+    async (route) => {
+      const hold = first;
+      first = false;
+      const response = await route.fetch();
+      if (hold) {
+        notify();
+        await gate;
+      }
+      await route.fulfill({ response });
+    },
+  );
+  return { release, committed };
+}
+
+test("save and rich-format acknowledgements retain typing and caret entered while responses wait", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Typing during save");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  const editor = page.getByTestId("text-editor");
+  const save = await holdNextOperation(page, doc.id);
+  await editor.fill("Submitted text");
+  await page.getByTestId("save-text").click();
+  await save.committed;
+  await editor.fill("Submitted text plus newer typing");
+  await editor.evaluate((el: HTMLTextAreaElement) => {
+    el.focus();
+    el.setSelectionRange(7, 7);
+  });
+  save.release();
+  await expect(page.getByTestId("save-text")).toBeEnabled();
+  await expect(editor).toHaveValue("Submitted text plus newer typing");
+  await expect(editor).toBeFocused();
+  expect(
+    await editor.evaluate((el: HTMLTextAreaElement) => el.selectionStart),
+  ).toBe(7);
+  expect(
+    (await current(doc.id)).pages[0].elements.find((e) => e.id === target.id)!
+      .text,
+  ).toBe("Submitted text");
+  await page.getByTestId("save-text").click();
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(2);
+  await expect(page.getByTestId("save-text")).toBeDisabled();
+  const format = await holdNextOperation(page, doc.id);
+  await editor.evaluate((el: HTMLTextAreaElement) => {
+    el.focus();
+    el.setSelectionRange(0, 9);
+  });
+  await page.getByRole("button", { name: "Bold", exact: true }).click();
+  await format.committed;
+  await editor.fill("Submitted text plus newer typing and another edit");
+  await editor.evaluate((el: HTMLTextAreaElement) => {
+    el.focus();
+    el.setSelectionRange(12, 12);
+  });
+  format.release();
+  await expect(page.getByTestId("save-text")).toBeEnabled();
+  await expect(editor).toHaveValue(
+    "Submitted text plus newer typing and another edit",
+  );
+  expect(
+    await editor.evaluate((el: HTMLTextAreaElement) => el.selectionStart),
+  ).toBe(12);
+  await page.getByTestId("save-text").click();
+  await expect.poll(async () => (await current(doc.id)).revision).toBe(4);
+  expect(
+    (await current(doc.id)).pages[0].elements
+      .find((e) => e.id === target.id)!
+      .runs?.some((r) => r.text === "Submitted" && r.bold),
+  ).toBe(true);
+});
+
+test("a late own save acknowledgement preserves a newer local draft and newer agent conflict", async ({
+  page,
+}) => {
+  const doc = await setup(page, "Acknowledgement conflict");
+  const target = doc.pages[0].elements.find((e) => e.type === "text")!;
+  await page.locator(".layer").filter({ hasText: target.name }).click();
+  const editor = page.getByTestId("text-editor");
+  const save = await holdNextOperation(page, doc.id);
+  await editor.fill("Own submitted text");
+  await page.getByTestId("save-text").click();
+  await save.committed;
+  await editor.fill("Newer unsaved local text");
+  await agent(doc.id, [
+    {
+      type: "update_element",
+      elementId: target.id,
+      patch: { text: "Newer agent text" },
+    },
+  ]);
+  await expect(page.getByTestId("conflict-use-saved")).toBeVisible();
+  save.release();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect(editor).toHaveValue("Newer unsaved local text");
+  await expect(page.locator(".conflict")).toContainText("Newer agent text");
+  await page.getByTestId("conflict-use-saved").click();
+  await expect(editor).toHaveValue("Newer agent text");
+});
+
+test("draft identities are isolated across documents that reuse the same element ID", async ({
+  page,
+}) => {
+  const first = await call<Document>("/api/documents", {
+      name: "Shared ID first",
+      template: "blank",
+    }),
+    second = await call<Document>("/api/documents", {
+      name: "Shared ID second",
+      template: "blank",
+    });
+  const shared = {
+    id: "shared_title",
+    name: "Shared title",
+    type: "text",
+    x: 48,
+    y: 48,
+    width: 350,
+    height: 120,
+    text: "Shared saved text",
+    style: { fontSize: 24 },
+  };
+  for (const doc of [first, second])
+    await agent(doc.id, [
+      { type: "add_element", pageId: doc.pages[0].id, element: shared },
+    ]);
+  await page.goto(editorUrl(service.descriptor, first.id));
+  await page.getByTestId("canvas").waitFor();
+  await page.locator(".layer").filter({ hasText: "Shared title" }).click();
+  await page
+    .getByTestId("text-editor")
+    .fill("Draft belonging only to the first document");
+  await page.getByTestId("document-select").selectOption(second.id);
+  await page.locator(".layer").filter({ hasText: "Shared title" }).click();
+  await expect(page.getByTestId("text-editor")).toHaveValue(
+    "Shared saved text",
+  );
+  await page
+    .getByTestId("text-editor")
+    .fill("Draft belonging only to the second document");
+  await page.getByTestId("document-select").selectOption(first.id);
+  await page.locator(".layer").filter({ hasText: "Shared title" }).click();
+  await expect(page.getByTestId("text-editor")).toHaveValue(
+    "Draft belonging only to the first document",
+  );
+  await agent(first.id, [{ type: "delete_element", elementId: shared.id }]);
+  await expect(
+    page.getByTestId("deleted-draft").getByRole("textbox"),
+  ).toHaveValue("Draft belonging only to the first document");
+  await page.getByTestId("document-select").selectOption(second.id);
+  await expect(page.getByTestId("deleted-draft")).toHaveCount(0);
+  await page.locator(".layer").filter({ hasText: "Shared title" }).click();
+  await expect(page.getByTestId("text-editor")).toHaveValue(
+    "Draft belonging only to the second document",
+  );
+  await agent(second.id, [{ type: "delete_element", elementId: shared.id }]);
+  await expect(
+    page.getByTestId("deleted-draft").getByRole("textbox"),
+  ).toHaveValue("Draft belonging only to the second document");
+  await page.getByTestId("document-select").selectOption(first.id);
+  await expect(
+    page.getByTestId("deleted-draft").getByRole("textbox"),
+  ).toHaveValue("Draft belonging only to the first document");
+  await page
+    .getByRole("button", { name: "Recover as new text", exact: true })
+    .click();
+  await expect
+    .poll(async () => (await current(first.id)).pages[0].elements[0]?.text)
+    .toBe("Draft belonging only to the first document");
+  expect((await current(second.id)).pages[0].elements).toHaveLength(0);
+});
