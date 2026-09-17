@@ -13,8 +13,10 @@ import { fileURLToPath } from "node:url";
 import { randomUUID, createHash } from "node:crypto";
 import { chromium, type Browser, type Page as BrowserPage } from "playwright";
 import { PDFDocument } from "pdf-lib";
+import { create as createFont, type Font } from "fontkit";
 import { DocumentView } from "../render/DocumentView.js";
 import { documentCss, fontFiles } from "../render/styles.js";
+import { parseUnicodeRanges } from "../domain/design-system.js";
 import {
   validateDocument,
   type Document,
@@ -30,6 +32,7 @@ import {
 } from "./assets.js";
 export {
   importAsset,
+  inspectFontMetadata,
   assetDiskPath,
   readVerifiedAsset,
   MAX_ASSET_BYTES,
@@ -65,7 +68,7 @@ export function renderHtml(
 ): string {
   const checked = validateDocument(doc);
   return (
-    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src &#39;self&#39; data:; font-src data:; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>' +
+    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src &#39;self&#39; data:; font-src &#39;self&#39; data:; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>' +
     escape(checked.name) +
     "</title><style>" +
     exportCss() +
@@ -83,7 +86,13 @@ export type ExportDiagnostics = {
   revision: number;
   pageCount: number;
   pages: { id: string; width: number; height: number }[];
-  fonts: { family: string; loaded: boolean }[];
+  fonts: {
+    family: string;
+    loaded: boolean;
+    weight?: number;
+    style?: string;
+    missingGlyphs?: string[];
+  }[];
   overflow: { elementId: string; pageId: string; reason: string }[];
   images: { elementId: string; loaded: boolean }[];
   links: { href: string; text: string }[];
@@ -135,20 +144,89 @@ export async function browserHealth(): Promise<object> {
 async function diagnose(
   page: BrowserPage,
   doc: Document,
+  fontData?: Map<string, Buffer>,
 ): Promise<ExportDiagnostics> {
   const result = await page.evaluate(async () => {
     await document.fonts.ready;
+    const used = new Map<
+      string,
+      {
+        family: string;
+        cssFamily: string;
+        weight: number;
+        style: string;
+        characters: Set<string>;
+      }
+    >();
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+    );
+    while (walker.nextNode()) {
+      const node = walker.currentNode,
+        parent = node.parentElement,
+        element = parent?.closest<HTMLElement>("[data-element-id]");
+      if (!parent || !element || !node.textContent?.trim()) continue;
+      const style = getComputedStyle(parent),
+        cssFamily = style.fontFamily
+          .split(",")[0]
+          .trim()
+          .replace(/^['"]|['"]$/g, ""),
+        weight = Number(style.fontWeight) || 400;
+      const declared = element.dataset.fontFamily || "Inter";
+      const family =
+        declared === "serif"
+          ? "Lora"
+          : declared === "sans-serif"
+            ? "Inter"
+            : declared === "monospace"
+              ? "IBM Plex Mono"
+              : declared;
+      const key = `${cssFamily}|${weight}|${style.fontStyle}`;
+      let entry = used.get(key);
+      if (!entry) {
+        entry = {
+          family,
+          cssFamily,
+          weight,
+          style: style.fontStyle,
+          characters: new Set(),
+        };
+        used.set(key, entry);
+      }
+      for (const character of node.textContent)
+        if (entry.characters.size < 4096 && !/\s/.test(character))
+          entry.characters.add(character);
+    }
     const fonts = await Promise.all(
-      ["Inter", "Lora", "IBM Plex Mono"].map(async (family) => {
+      [...used.values()].map(async (entry) => {
+        const sample = [...entry.characters].join(""),
+          query = `${entry.style} ${entry.weight} 16px "${entry.cssFamily}"`;
         try {
-          const loaded = await document.fonts.load(`16px "${family}"`);
+          const faces = await document.fonts.load(query, sample);
           return {
-            family,
+            family: entry.family,
+            weight: entry.weight,
+            style: entry.style,
             loaded:
-              loaded.length > 0 && document.fonts.check(`16px "${family}"`),
+              faces.length > 0 &&
+              faces.every((face) => face.status === "loaded") &&
+              document.fonts.check(query, sample),
+            loadedFaces: faces.map((face) => ({
+              weight: Number(face.weight),
+              style: face.style,
+            })),
+            sample,
           };
         } catch {
-          return { family, loaded: false };
+          return {
+            family: entry.family,
+            weight: entry.weight,
+            style: entry.style,
+            loaded: false,
+            loadedFaces: [],
+            sample,
+          };
         }
       }),
     );
@@ -199,12 +277,78 @@ async function diagnose(
     ).map((a) => ({ href: a.href, text: a.textContent ?? "" }));
     return { fonts, overflow, images, links };
   });
+  const parsedFonts = new Map<string, Font>();
+  const fonts: ExportDiagnostics["fonts"] = result.fonts.map(
+    ({ sample, loadedFaces, ...entry }) => {
+      const familyFaces =
+        doc.designSystem?.fonts.filter(
+          (face) => face.family === entry.family,
+        ) ?? [];
+      if (!familyFaces.length || !fontData) return entry;
+      const candidates = familyFaces.filter(
+        (face) => face.style === entry.style,
+      );
+      const matchingStyle = candidates.length ? candidates : familyFaces;
+      const distance = Math.min(
+        ...matchingStyle.map((face) => Math.abs(face.weight - entry.weight)),
+      );
+      const faces = loadedFaces.length
+        ? familyFaces.filter((face) =>
+            loadedFaces.some(
+              (loaded) =>
+                loaded.weight === face.weight && loaded.style === face.style,
+            ),
+          )
+        : matchingStyle.filter(
+            (face) => Math.abs(face.weight - entry.weight) === distance,
+          );
+      try {
+        const coverage = faces.map((face) => {
+          let font = parsedFonts.get(face.assetId);
+          if (!font) {
+            const bytes = fontData.get(face.assetId);
+            if (!bytes) throw new Error("Missing font data");
+            const parsed = createFont(bytes);
+            if ("fonts" in parsed) throw new Error("Font collection");
+            font = parsed;
+            parsedFonts.set(face.assetId, font);
+          }
+          return {
+            font,
+            ranges: face.unicodeRange
+              ? parseUnicodeRanges(face.unicodeRange)
+              : undefined,
+          };
+        });
+        const missingGlyphs = [...sample].filter((character) => {
+          const point = character.codePointAt(0)!;
+          return !coverage.some(
+            ({ font, ranges }) =>
+              (!ranges ||
+                ranges.some(
+                  (range) => point >= range.start && point <= range.end,
+                )) &&
+              font.hasGlyphForCodePoint(point),
+          );
+        });
+        return { ...entry, ...(missingGlyphs.length ? { missingGlyphs } : {}) };
+      } catch {
+        return { ...entry, loaded: false };
+      }
+    },
+  );
   return {
     ...emptyDiagnostics(doc),
     ...result,
+    fonts,
     warnings: [
-      ...(result.fonts.some((f) => !f.loaded)
-        ? ["One or more bundled fonts did not load."]
+      ...(fonts.some((f) => !f.loaded)
+        ? ["One or more fonts used by document text did not load."]
+        : []),
+      ...(fonts.some((f) => f.missingGlyphs?.length)
+        ? [
+            "Some characters are missing from a custom font and use browser fallback.",
+          ]
         : []),
       ...(result.images.some((i) => !i.loaded)
         ? ["One or more images could not be decoded."]
@@ -212,6 +356,7 @@ async function diagnose(
     ],
   };
 }
+
 function base64(data: unknown, max = MAX_ASSET_BYTES): Buffer {
   if (
     typeof data !== "string" ||
@@ -340,6 +485,11 @@ export async function exportDocument(
       { asset, data: readVerifiedAsset(asset, assetsDir) },
     ]),
   );
+  const fontData = new Map(
+    [...assets.values()]
+      .filter(({ asset }) => asset.mime.startsWith("font/"))
+      .map(({ asset, data }) => [asset.id, data]),
+  );
   const resolver = (id: string) => {
     const entry = assets.get(id);
     if (!entry) throw new Error(`Missing asset ${id}`);
@@ -432,7 +582,7 @@ export async function exportDocument(
         await page.setContent(renderHtml(renderDoc, resolver), {
           waitUntil: "load",
         });
-        diagnostics = await diagnose(page, doc);
+        diagnostics = await diagnose(page, doc, fontData);
         bytes = await page
           .locator(".vds-document")
           .screenshot({ type: "png", animations: "disabled", timeout: 30000 });
@@ -448,11 +598,27 @@ export async function exportDocument(
             renderHtml({ ...renderDoc, pages: [sourcePage] }, resolver),
             { waitUntil: "load" },
           );
-          const current = await diagnose(page, {
-            ...renderDoc,
-            pages: [sourcePage],
-          });
-          diagnostics.fonts = current.fonts;
+          const current = await diagnose(
+            page,
+            {
+              ...renderDoc,
+              pages: [sourcePage],
+            },
+            fontData,
+          );
+          for (const font of current.fonts)
+            if (
+              !diagnostics.fonts.some(
+                (old) =>
+                  old.family === font.family &&
+                  old.weight === font.weight &&
+                  old.style === font.style &&
+                  old.loaded === font.loaded &&
+                  JSON.stringify(old.missingGlyphs) ===
+                    JSON.stringify(font.missingGlyphs),
+              )
+            )
+              diagnostics.fonts.push(font);
           diagnostics.overflow.push(...current.overflow);
           diagnostics.images.push(...current.images);
           diagnostics.links.push(...current.links);

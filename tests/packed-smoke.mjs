@@ -213,6 +213,360 @@ async function stop(target) {
     timeout: 15000,
   }).catch(() => {});
 }
+const elementsIn = (items) =>
+  items.flatMap((item) => [item, ...elementsIn(item.children ?? [])]);
+async function verifyDesignSystems(
+  client,
+  api,
+  freshProjectClient,
+  browserAvailable,
+  legacyDocumentId,
+) {
+  console.log(
+    "Verifying installed design-system import, font subsets, immutable pins and native components…",
+  );
+  const installedAssets = path.join(
+    path.dirname(path.dirname(cli)),
+    "assets",
+    "fonts",
+  );
+  const latin = readFileSync(
+    path.join(installedAssets, "inter-latin-400-normal.woff2"),
+  );
+  const extended = readFileSync(
+    path.join(installedAssets, "inter-latin-ext-400-normal.woff2"),
+  );
+  const license = readFileSync(path.join(installedAssets, "Inter-OFL.txt"));
+  assert.match(license.toString(), /SIL OPEN FONT LICENSE/i);
+  const css = `
+    :root { --brand-primary: #184f44; --brand-accent: #df774f; --surface-background: #f7f9f6;
+      --font-body: "Packed Sans"; --font-heading: "Packed Sans"; --space-card: 16px; }
+    @font-face { font-family: "Packed Sans"; src: url("fonts/latin.woff2"); font-weight: 400;
+      font-style: normal; unicode-range: U+0000-00FF; }
+    @font-face { font-family: "Packed Sans"; src: url("fonts/extended.woff2"); font-weight: 400;
+      font-style: normal; unicode-range: U+0100-02FF; }
+    .card { width: 480px; padding: var(--space-card); background: var(--surface-background);
+      color: var(--brand-primary); font-family: var(--font-body); }
+    h2 { font-size: 24px; font-weight: 400; line-height: 1.3; font-family: var(--font-heading); }
+    p { font-size: 18px; font-weight: 400; line-height: 1.4; }
+  `;
+  const sourceFile = (name, bytes) => ({
+    name,
+    data: Buffer.from(bytes).toString("base64"),
+  });
+  const draft = await call(client, "design_system_preview", {
+    name: "Packed custom design system",
+    version: "1.0.0",
+    files: [
+      sourceFile("brand.css", css),
+      sourceFile(
+        "card.html",
+        '<section data-component="Packed card" class="card"><h2>Imported headline</h2><p>Original component copy.</p></section>',
+      ),
+      sourceFile("fonts/latin.woff2", latin),
+      sourceFile("fonts/extended.woff2", extended),
+      sourceFile("Inter-OFL.txt", license),
+      sourceFile(
+        "brand-guidelines.md",
+        "Use the supplied typefaces and keep components editable.",
+      ),
+    ],
+  });
+  assert.deepEqual(draft.validationErrors, []);
+  assert.equal(draft.report.importKind, "html");
+  assert.equal(draft.system.fonts.length, 2);
+  assert.deepEqual(draft.system.fonts.map((face) => face.unicodeRange).sort(), [
+    "U+0-FF",
+    "U+100-2FF",
+  ]);
+  assert.ok(
+    draft.system.guidelines.some((value) =>
+      value.includes("SIL OPEN FONT LICENSE"),
+    ),
+  );
+  assert.ok(draft.system.components.length);
+  assert.equal(draft.system.tokens["font-body"].value, "Packed Sans");
+  assert.equal(draft.specimen.designSystem.id, draft.system.id);
+  const unsaved = await call(client, "design_system_list");
+  assert.equal(unsaved.systems.length, 0, "Preview must not save a release");
+  const saved = await call(client, "design_system_save", {
+    system: draft.system,
+  });
+  assert.deepEqual(
+    saved.system,
+    draft.system,
+    "Save must pin the exact normalized review",
+  );
+  assert.equal(saved.digest, draft.digest);
+  const ref = {
+    id: saved.system.id,
+    version: saved.system.version,
+    digest: saved.digest,
+  };
+  const read = await call(client, "design_system_read", {
+    id: ref.id,
+    version: ref.version,
+  });
+  assert.deepEqual(read.system, saved.system);
+  assert.equal(read.digest, saved.digest);
+  assert.equal(
+    (await call(client, "design_system_save", { system: saved.system })).digest,
+    ref.digest,
+  );
+  const mismatch = structuredClone(saved.system);
+  mismatch.name = "Changed without a version bump";
+  const rejected = await client.callTool({
+    name: "design_system_save",
+    arguments: { system: mismatch },
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(
+    rejected.content.find((item) => item.type === "text").text,
+    /immutable/i,
+  );
+  await call(client, "design_system_set_default", { system: ref });
+  assert.deepEqual(
+    (await call(client, "design_system_list")).defaultSystem,
+    ref,
+  );
+  const pinned = await call(client, "document_create", {
+    name: "Packed system document",
+    template: "blank",
+  });
+  assert.deepEqual(pinned.document.designSystem, saved.system);
+  assert.equal(
+    pinned.document.pages[0].backgroundToken,
+    saved.system.roles.pageBackground,
+  );
+  assert.equal(
+    (await call(client, "document_read", { documentId: legacyDocumentId }))
+      .designSystem,
+    undefined,
+  );
+  const optOut = await call(client, "document_create", {
+    name: "Explicit default opt out",
+    designSystem: null,
+  });
+  assert.equal(optOut.document.designSystem, undefined);
+  const applied = await call(client, "design_system_apply", {
+    ...ref,
+    documentId: optOut.documentId,
+    operationId: "packed-system-apply",
+    actor: "packed",
+    expectedRevision: 0,
+  });
+  assert.deepEqual(applied.document.designSystem, saved.system);
+  const component = saved.system.components[0];
+  const [slotName, slot] = Object.entries(component.slots).find(
+    ([, value]) => value.type === "text",
+  );
+  const submittedText = "Custom design: Zażółć";
+  const insertion = {
+    documentId: pinned.documentId,
+    operationId: "packed-component-insert",
+    actor: "packed",
+    expectedRevision: 0,
+    pageId: pinned.document.pages[0].id,
+    componentId: component.id,
+    slots: { [slotName]: submittedText },
+    x: 48,
+    y: 48,
+  };
+  const inserted = await call(client, "component_insert", insertion);
+  assert.equal(inserted.revision, 1);
+  assert.deepEqual(
+    await call(client, "component_insert", insertion),
+    inserted,
+    "Component insertion retries must deduplicate",
+  );
+  const copied = inserted.document.pages[0].elements[0];
+  assert.deepEqual(copied.componentSource, {
+    systemId: ref.id,
+    systemVersion: ref.version,
+    componentId: component.id,
+  });
+  const changedText = elementsIn([copied]).find(
+    (item) => item.text === submittedText,
+  );
+  assert.ok(changedText);
+  assert.notEqual(changedText.id, slot.elementId);
+  const editedText = "Editable custom type: Zażółć";
+  const edited = await call(client, "document_apply", {
+    documentId: pinned.documentId,
+    batch: {
+      operationId: "packed-component-edit",
+      actor: "human:packed",
+      expectedRevision: 1,
+      operations: [
+        {
+          type: "update_element",
+          elementId: changedText.id,
+          patch: { text: editedText },
+        },
+      ],
+    },
+  });
+  assert.equal(edited.revision, 2);
+  assert.deepEqual(
+    await call(client, "component_insert", insertion),
+    inserted,
+    "An old exact retry must not replace later text",
+  );
+  assert.equal(
+    elementsIn(
+      (await call(client, "document_read", { documentId: pinned.documentId }))
+        .pages[0].elements,
+    ).find((item) => item.id === changedText.id).text,
+    editedText,
+  );
+  const check = await call(client, "design_system_check", {
+    documentId: pinned.documentId,
+  });
+  assert.equal(check.revision, 2);
+  assert.ok(
+    check.diagnostics.every((diagnostic) => diagnostic.severity !== "error"),
+  );
+  const next = structuredClone(saved.system);
+  next.version = "1.1.0";
+  next.tokens["brand-primary"].value = "#553377";
+  const later = await call(client, "design_system_save", { system: next });
+  await call(client, "design_system_set_default", {
+    system: { id: next.id, version: next.version, digest: later.digest },
+  });
+  assert.equal(
+    (await call(client, "document_read", { documentId: pinned.documentId }))
+      .designSystem.version,
+    "1.0.0",
+  );
+  assert.equal(
+    (await call(client, "document_create", { name: "New default version" }))
+      .document.designSystem.version,
+    "1.1.0",
+  );
+  let project;
+  for (const format of [
+    "html",
+    "bundle",
+    ...(browserAvailable ? ["pdf", "png"] : []),
+  ]) {
+    const output = await call(client, "document_export", {
+      documentId: pinned.documentId,
+      revision: 2,
+      format,
+      ...(format === "png" ? { pageId: pinned.document.pages[0].id } : {}),
+    });
+    const bytes = await download(api, output.url);
+    assert.equal(output.revision, 2);
+    assert.ok(bytes.length > 100);
+    if (format === "bundle") {
+      project = bytes;
+      const parsed = JSON.parse(bytes);
+      assert.deepEqual(parsed.document.designSystem, saved.system);
+      for (const face of saved.system.fonts)
+        assert.ok(parsed.assets.some((asset) => asset.id === face.assetId));
+    }
+    if (format === "html") {
+      assert.match(bytes.toString(), /unicode-range:U\+0-FF/);
+      assert.match(bytes.toString(), /unicode-range:U\+100-2FF/);
+      assert.match(bytes.toString(), /VDS_Packed Sans/);
+      assert.ok(bytes.toString().includes(editedText));
+      assert.ok(bytes.toString().includes(latin.toString("base64")));
+      assert.ok(bytes.toString().includes(extended.toString("base64")));
+    }
+    if (format === "pdf" || format === "png") {
+      const importedFonts = output.diagnostics.fonts.filter(
+        (font) => font.family === "Packed Sans",
+      );
+      assert.ok(
+        importedFonts.length,
+        "Render diagnostics must inspect the imported font",
+      );
+      assert.ok(
+        importedFonts.every(
+          (font) => font.loaded && !font.missingGlyphs?.length,
+        ),
+        JSON.stringify(output.diagnostics),
+      );
+      assert.deepEqual(output.diagnostics.overflow, []);
+      if (format === "pdf")
+        assert.equal((await PDFDocument.load(bytes)).getPageCount(), 1);
+      else {
+        assert.equal(bytes.readUInt32BE(16), pinned.document.pages[0].width);
+        assert.equal(bytes.readUInt32BE(20), pinned.document.pages[0].height);
+      }
+    }
+  }
+  const portable = await call(client, "design_system_export", ref);
+  const portableBytes = await download(api, portable.url);
+  const portableData = JSON.parse(portableBytes);
+  assert.equal(portableData.digest, ref.digest);
+  assert.deepEqual(portableData.system, saved.system);
+  const clean = await connect(path.join(root, "portable system workspace"));
+  assert.equal(
+    (await call(clean.client, "design_system_list")).systems.length,
+    0,
+  );
+  const incoming = await call(clean.client, "design_system_preview", {
+    files: [sourceFile("brand.vds-system.json", portableBytes)],
+  });
+  assert.deepEqual(incoming.validationErrors, []);
+  assert.deepEqual(incoming.system, saved.system);
+  assert.equal(incoming.digest, ref.digest);
+  const imported = await call(clean.client, "design_system_save", {
+    system: incoming.system,
+  });
+  assert.equal(imported.digest, ref.digest);
+  await call(clean.client, "design_system_set_default", { system: ref });
+  assert.deepEqual(
+    (await call(clean.client, "document_create", { name: "Portable default" }))
+      .document.designSystem,
+    saved.system,
+  );
+  assert.equal(
+    (await call(freshProjectClient, "design_system_list")).systems.length,
+    0,
+  );
+  const importedProject = await call(freshProjectClient, "project_import", {
+    data: project.toString("base64"),
+  });
+  assert.deepEqual(importedProject.designSystem, saved.system);
+  assert.equal(importedProject.revision, 0);
+  assert.equal(
+    (await call(freshProjectClient, "design_system_list")).systems.length,
+    0,
+    "Project snapshots remain self-contained without silently installing a library",
+  );
+  const continued = await call(freshProjectClient, "document_apply", {
+    documentId: importedProject.id,
+    batch: {
+      operationId: "packed-system-fresh-edit",
+      actor: "packed:fresh",
+      expectedRevision: 0,
+      operations: [
+        {
+          type: "update_element",
+          elementId: changedText.id,
+          patch: { text: "Still editable with the imported font" },
+        },
+      ],
+    },
+  });
+  assert.equal(continued.revision, 1);
+  const finalExport = await call(freshProjectClient, "document_export", {
+    documentId: importedProject.id,
+    revision: 1,
+    format: browserAvailable ? "pdf" : "html",
+  });
+  if (browserAvailable)
+    assert.ok(
+      finalExport.diagnostics.fonts.some(
+        (font) => font.family === "Packed Sans" && font.loaded,
+      ),
+    );
+  console.log(
+    "Verified installed BYO tools, CSS/HTML/font import, exact version pins, editable components, font subset rendering, portable systems and self-contained project round-trips.",
+  );
+}
 try {
   mkdirSync(install, { recursive: true });
   writeFileSync(
@@ -282,8 +636,31 @@ try {
     "document_export",
     "project_import",
     "history_undo",
+    "design_system_list",
+    "design_system_read",
+    "design_system_preview",
+    "design_system_save",
+    "design_system_asset_import",
+    "design_system_set_default",
+    "design_system_apply",
+    "design_system_check",
+    "design_system_export",
+    "component_insert",
   ])
     assert.ok(tools.tools.some((tool) => tool.name === name));
+  assert.match(
+    JSON.stringify(
+      tools.tools.find((tool) => tool.name === "design_system_save")
+        .inputSchema,
+    ),
+    /unicodeRange/,
+  );
+  assert.match(
+    JSON.stringify(
+      tools.tools.find((tool) => tool.name === "document_apply").inputSchema,
+    ),
+    /tokenBindings/,
+  );
   let api = await endpoint(client);
   const firstWorkspaceId = api.workspaceId;
   const created = await call(client, "document_create", {
@@ -562,6 +939,13 @@ try {
     },
   });
   assert.equal(continued.revision, 1);
+  await verifyDesignSystems(
+    restarted,
+    api,
+    fresh.client,
+    browserAvailable,
+    documentId,
+  );
   const absentPath = path.join(root, "no installed browsers");
   const noBrowserDoctor = JSON.parse(
     (

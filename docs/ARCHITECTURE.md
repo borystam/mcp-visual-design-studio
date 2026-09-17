@@ -6,7 +6,7 @@ One repository and one npm package contain five layers:
 2. **Workspace service** (`src/server`): one exclusive owner for a canonical directory; persistent revision store, authenticated loopback HTTP API and SSE broadcasts.
 3. **MCP adapter** (`src/mcp.ts`): official TypeScript SDK v2.0.0 over stdio, including legacy protocol negotiation. It calls the same HTTP operation endpoints as the editor. MCP stdout contains protocol traffic only.
 4. **Browser editor** (`src/ui`): React components, page/layer navigation, inspector, draft conflict handling, selection, history and variations. EventSource reconnects and refreshes current state after missed events.
-5. **Renderer/export worker** (`src/render`, `src/export`): shared React DOM/CSS, bundled fonts, a bounded isolated Playwright Chromium context for PNG/PDF, native PDF pages combined with pdf-lib. HTML and bundles do not require a browser.
+5. **Renderer/export worker** (`src/render`, `src/export`): shared React DOM/CSS, bundled and imported fonts, a bounded isolated Playwright Chromium context for PNG/PDF, native PDF pages combined with pdf-lib. HTML and bundles do not require a browser.
 
 The service is a detached process; agent sessions are clients. It uses a random loopback port and a descriptor with workspace identity, instance identity, exact application version, runtime version and a random token. Clients verify identity and compatibility before reuse. An atomically published nonempty ownership directory prevents competing writers. Recovery removes only the dead owner’s exact nonce marker before removing its empty directory, so a competing process cannot erase a new owner’s lock. Live process IDs are never taken over. No daemon is installed at login and no external server is contacted by ordinary editing.
 
@@ -31,3 +31,11 @@ No remote multiplayer, CRDT, arbitrary JavaScript tool or model API is implement
 ## Rendering
 
 Coordinates are CSS pixels at 96 dpi; PDF sizes use 72/96 points per pixel. Image contents and fonts are embedded in standalone output. Export reads an immutable saved revision and its hash-verified assets before asynchronous rendering. Fonts, image decoding, links, page size/count and element overflow are reported. Bundles keep the full native document and assets; they omit runtime credentials, history and local paths.
+
+## Design systems
+
+`src/systems` provides a bounded, data-only importer and a workspace library. CSS/HTML/token/ZIP inputs produce a reviewable draft, warnings and a native specimen; arbitrary application code is never executed. Semantic validation must pass before saving an immutable system version. Asset bytes are checked against their declared container, hash and size. A portable system includes those bytes and a canonical digest.
+
+Documents embed the complete selected system snapshot, so a newly saved library version or changed workspace default does not alter existing pages. Explicit application mappings produce one guarded atomic operation batch. Literal edits detach the affected token binding; inserted components are native editable trees with historical source metadata, rather than live-linked instances. System and default changes emit workspace SSE events independently of document revisions.
+
+The browser and exporter resolve the same token and font data. Imported fonts use scoped internal family names so different saved versions can render side by side. Font diagnostics use the text's selected weight, style, declared Unicode subsets and actual glyph coverage. Standalone HTML, project bundles and portable systems carry required fonts/images without fetching them from external URLs.

@@ -1,61 +1,54 @@
 # Release validation
 
-Observed on 2026-09-17. Source tests, a genuine installed npm tarball, browser interaction, real agent hosts and visual inspection are distinct evidence below.
+Observed on 2026-09-17. Source tests, installed-package tests, browser interactions, real MCP hosts and visual inspection are separate evidence. Historical 0.1.1 evidence is preserved in [VALIDATION_0.1.1.md](VALIDATION_0.1.1.md).
 
-## 0.1.1 validation
+## 0.2.0 local checks
 
-The inspector acknowledgement fix and execution-time operation builders add five delayed-response browser regressions to the original release gates. The test holds both HTTP acknowledgements and document refreshes, reverses text and numeric edits, and preserves further focused typing and caret position; it was confirmed to fail before the fix and pass after it. Additional compound-edit tests cover independent table cells/row/column additions, crop axes, brand fields and components with an uploaded logo, rich formatting followed by text saves, layer/page order, grouping and page orientation. All four compound regressions were confirmed to fail against the prior UI and pass with execution-time builders. The patch candidate passed all six clean platform/Node combinations, including all 21 browser regressions and the installed-package smoke flow. The matrix below records this 0.1.1 implementation run.
+Strict TypeScript checking and the production build pass. The candidate passed 113 unit/integration tests with no local skips, all 24 browser tests, and the installed-package smoke gate. Platform results are recorded separately below.
 
-## Local checks
+New domain and service tests cover typed token aliases, missing/circular references, font declarations and Unicode subsets, immutable versions/digests, explicit application mappings, historical component provenance, editable slots, guarded undo, default pins and restart persistence. Existing operation/concurrency, delayed-response editing, caret, crash-recovery and export regressions continue to run.
 
-- Final local candidate: **69/69 unit/integration tests**, **21/21 browser tests**, and the installed-package smoke test passed. The unit count includes three focused rich-text diff tests; no local tests were skipped.
-- Strict TypeScript checking and production build pass.
-- Unit/integration tests cover strict schemas, atomic batch failure, exact retries after restart, duplicate-operation payload conflicts, immutable revisions, crash recovery, document-identity isolation, guarded undo/redo, snapshots, variations, migration, safe imports and executable-content rejection.
-- Actual child processes cover competing writers, concurrent stale-owner recovery, SIGKILL recovery, live-PID protection and stale-release safety.
-- Service tests cover authentication, Host/Origin rejection, SSE, optimistic conflicts, selection, restart, occupied ports, atomic workspace identity initialization, identity/token rotation and rejection of incompatible service versions.
-- Real Chromium exports verify PNG pixels, PDF native text/fonts, clickable links, page count, mixed dimensions, saved-revision consistency, overflow, cancellation and image decoding.
-- Playwright browser tests exercise manual text edits, caret/focus preservation during unrelated updates, synthetic composition events, same-field conflicts, image upload, drag, keyboard movement, comments, agent edits, safe undo, snapshots, variations, bundle export, reload/reconnect, rich-text selection, grouping and keyboard dialogs. Deterministic delayed-response tests cover serialized browser writes, committed-but-aborted responses without automatic replay, switching documents while writes are pending and intervening agent changes.
-- Further browser regressions preserve new typing during delayed text/format saves, retain newer remote conflicts, isolate drafts across documents with identical element IDs, retain rich formatting through plain edits and recover drafts after element/page deletion.
-- A held-response regression queues multiple drags, resizes and nudges before earlier saves are acknowledged, then verifies every relative change accumulates. It was confirmed to fail against the earlier stale-coordinate implementation and pass with geometry derived from the latest saved state.
+Source-import tests cover supported DTCG values, static CSS/HTML, original ZIP fixtures, local fonts and license notes, portable system round trips, malformed/tampered assets, ZIP traversal/symlinks/duplicate paths/decompression limits, bounded source trees and alias inference, preserved inherited token bindings, consistent imported text line heights, and repairable missing-font drafts. Imported application code is not executed; external assets are not fetched.
 
-Native operating-system IME candidate windows are not automated; composition lifecycle events are tested in Chromium. Unsaved browser drafts are retained across incoming updates but are not persisted across closing the tab.
+The three new browser workflows cover the complete import/review/save/default/create/insert/edit/export lifecycle, explicit mappings with an active text draft, and token/ZIP imports with missing-font validation. They also verify live workspace-default updates, version pins, imported font choices, direct image insertion and modal keyboard focus. The previous 21 editing and synchronization regressions pass alongside them.
 
-## Installed release package
+## Installed package and portability
 
-`npm run test:pack` creates and scans an actual tarball, installs it with dependencies into a clean directory with spaces and Japanese characters, and launches the installed CLI/MCP server. It verifies human/agent HTTP+SSE changes, comments and selection, safe undo preserving human text, image import, snapshots, EOF, restart/recovery, variations, PDF/PNG/HTML/bundle exports, real MCP image bytes, a bundle round trip into a second workspace and another edit there. A separate missing-browser environment verifies actionable diagnostics and ordinary editing/HTML export without automatic provisioning. The package allowlist and contents are scanned for private/runtime files, credentials and machine paths.
+`npm run test:pack` builds and scans an actual tarball, installs its dependencies into a fresh directory containing spaces and Japanese characters, and drives the installed stdio MCP server and HTTP editor service. It retains all prior release checks and discovers the ten additional design-system/component tools.
 
-The CI packed-package gate requires a working export browser; it cannot silently pass with PDF/PNG coverage skipped. Windows omits file-symlink creation tests that require developer-mode privileges and the owner-lock symlink subcase; directory-junction asset boundary checks still run.
+The new packed workflow imports original HTML/CSS and licensed local WOFF2 subsets, verifies exact preview/save digests, rejects mutable version replacements, pins workspace defaults, creates documents, inserts and edits native component slots, retries the original insert after a later edit, and runs system checks. It exports real PNG/PDF and standalone HTML with custom-font diagnostics, transfers a portable system into a fresh workspace, then transfers a self-contained editable project bundle and edits it again.
 
-An actual installed-package upgrade from 0.1.0 to 0.1.1 was also exercised: the new CLI rejected reuse of the still-running older service; after stopping it with the old CLI, the new service retained workspace identity, document IDs, saved text and revision history. Retrying the original operation deduplicated correctly, and a new edit plus PNG preview succeeded after the upgrade.
+Custom-font tests exercise WOFF2, WOFF, TTF and OTF validation, bounded container decoding, immutable asset verification and safe paths. Real Chromium renders verify font selection, missing glyphs, subset coverage and identical PNG pixels after a fresh-workspace bundle round trip. PDF tests verify selectable text and embedded fonts, including the original tiny MIT-licensed CFF/OTF fixture. Original font-generation source is included with the tests.
 
-## Real MCP hosts
-
-| Host | Version | Environment | Observed result |
-| --- | --- | --- | --- |
-| Codex CLI | 0.154.0 | macOS arm64; Node 26.5.0 | Workspace, template creation, read, atomic text edit, selection/comments read and actual PNG image inspection passed. Two invalid edit payloads were rejected; the corrected targeted batch succeeded. |
-| Claude Code | 2.1.263 | macOS arm64; Node 26.5.0 | Brochure creation, atomic heading edit, actual PNG image inspection, anchored comment creation and comment read passed. |
-| Official SDK client | 2.0.0 | Source and installed-package tests | Real stdio process and protocol discovery/calls passed; this is separate from real-host evidence. |
-
-Codex described the edited cream serif heading, evergreen upper page, cream lower page, sage ring and peach shapes. Claude Code described the updated heading and terracotta courtyard illustration. Both reported visible image pixels and clear rendered content; neither was credited solely for receiving an image envelope.
-
-Both real-host sessions were repeated against the CLI from a clean installation of the 0.1.1 candidate tarball at commit `932e08e`. Saved headings, histories and comment anchors were independently verified afterward: Codex revision 2 with one anchored comment; Claude revision 3 with an anchored heading comment added in a narrow host follow-up after its initial comment was document-level. The original comment was retained. Actual 794 × 1123 preview PNGs were also verified. Both host processes and the follow-up exited successfully, and both test workspace services were stopped.
-
-No claim is made for other hosts or the Codex desktop app UI specifically. Host auth/session logs are private ignored artifacts and are not distributed.
+An actual installed 0.1.1 → 0.2.0 upgrade was exercised: the new CLI rejected reuse of the older running service; after stopping it, workspace identity, saved text, revisions and exact-operation deduplication survived. A subsequent edit and actual PNG preview succeeded. Older documents need no bulk rewrite; documents using new optional design-system fields require 0.2.0 or newer.
 
 ## Visual inspection
 
-All six pages across Fieldwork (one), Gather (three), and Signal (two) were inspected as rendered PNG and rasterized PDF. No clipping, broken alignment, missing bundled fonts or reported overflow remained. The localhost editor was inspected at desktop size; its original generic screenshot and short video are included as `demo.png` and `demo.webm`.
+The design-system library, token editor/specimen, explicit application preview, missing-font repair state and document component/asset controls were inspected at 1440 × 1080. The screenshots use original generic fixtures. No clipping or broken alignment remained. The original template/export visual evidence remains in the historical report.
+
+## Claude Design migration boundary
+
+**A genuine Claude Design account export has not been tested end to end.** The available browser session was signed out, and no real export was supplied. Original synthetic source ZIP/HTML fixtures establish the supported importer/editor/export behavior; they do not establish compatibility with every Claude Design export version or project.
+
+The [porting guide](CLAUDE_DESIGN_PORTING.md) documents the official ZIP/standalone-HTML handoff and the supported static subset. React/JSX and other executable source require translation by the user's connected agent. Full application behavior, responsive logic, PDF/PPTX reconstruction and automatic account connection are outside the importer.
+
+## Real MCP hosts
+
+Both hosts ran against a clean installed 0.2.0 candidate using original generic HTML/CSS and the tiny original OTF fixture. Temporary invocation settings preserved the user’s normal host configuration. Each host imported the source ZIP, saved a system and workspace default, created a document using that default, inserted a native component with a heading slot override, separately edited its body text, checked and rendered the document, added/read an anchored comment, and exported the portable system.
+
+| Actual host | Version / environment              | Observed result                                                                                         |
+| ----------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Claude Code | 2.1.263; macOS arm64 / Node 26.5.0 | Exit 0; 13 tool calls; native edit, actual preview pixels, anchored comment and portable export passed. |
+| Codex CLI   | 0.154.0; macOS arm64 / Node 26.5.0 | Exit 0; 15 tool calls; discovered the documented update operation and completed the same workflow.      |
+
+Both described the cream page, green card, cream serif/sans text and three peach upright triangle glyphs from the custom OTF. Both reported loaded Lora 700, Inter 400 and Studio Outline 400 faces, with no overflow, font warnings or system-check findings. Receiving an image envelope alone was not counted as image inspection.
+
+Independent checks afterward verified each revision-3 saved document, revision-2 preview, pinned snapshot/default identity, four native elements, edited body text, anchored comment, exact font bytes and portable-system reimport in a fresh asset directory. Both workspace services were stopped. The tested host candidate tarball’s SHA-256 was `1623db0a43d6d26dea05d3fcbf636b7e1c667e95cceb20430a1c7a6468a33d0a`; final source subsequently tightened oversized CSS token/alias bounds, covered by the complete local and installed-package gates above.
+
+The initial host run exposed inherited/default line-height disagreement and a flattened tool-schema description that left Codex without a clear operation example. The importer now explicitly records its estimated line height, and the tool description includes a valid edit example; both real hosts were repeated successfully with the original source fixture and prompt. Previous 0.1.1 checks remain historical evidence in the linked report. Host auth/session logs stay in ignored private artifacts and are not distributed. Claude Code host success does not establish a genuine Claude Design account migration.
 
 ## Platform matrix
 
-[The release implementation passed all six matrix jobs and the package job](https://github.com/borystam/mcp-visual-design-studio/actions/runs/35215370197) at commit `932e08e`. Subsequent release preparation changes only this validation report.
+The release uses the existing clean GitHub-hosted Ubuntu/macOS/Windows matrix with Node 22.12.0 and 24. Each job runs checking, build, unit/integration tests, all browser tests and the installed-package gate. PDF/PNG coverage cannot silently skip when the export browser is missing. Windows omits privileged file-symlink cases while directory-junction asset boundary checks still run.
 
-| Clean GitHub-hosted environment | Architecture | Observed Node versions | Result |
-| --- | --- | --- | --- |
-| Ubuntu 24.04.5 LTS | x64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 21 browser tests and installed-package smoke. |
-| macOS 26.6.2 (25G83) | arm64 | 22.12.0 and 24.20.0 | Both passed: 69 unit/integration tests, 21 browser tests and installed-package smoke. |
-| Windows Server 2025 Datacenter (10.0.26100) | x64 | 22.12.0 and 24.20.0 | Both passed: 68 unit/integration tests plus one explicit symlink skip, 21 browser tests and installed-package smoke. |
-
-Each installed-package run rendered PDF/PNG and real preview pixels, exported HTML and a portable bundle, imported into another workspace and continued editing. The package job produced an npm tarball and SHA-256 checksum only after every matrix job passed.
-
-Local development and real-host tests additionally ran on macOS arm64 / Node 26.5.0. Firefox, Safari, native IME candidate windows, unsupported writing systems, remote-only hosts, network filesystems and other processor/OS combinations are unverified.
+Local development runs on macOS arm64 / Node 26.5.0. Firefox, Safari, native operating-system IME candidate windows, unsupported writing systems, remote-only hosts, network filesystems and other processor/OS combinations remain unverified. Chromium composition lifecycle events are automated; unsaved drafts are not persisted after closing the tab.

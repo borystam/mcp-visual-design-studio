@@ -1,3 +1,11 @@
+# 0.2.0
+
+Bring your own design system: import token JSON, CSS, static HTML, source ZIPs and portable Studio system files; review extracted tokens, assets, components, fonts and guidelines before saving an immutable version. Choose a workspace default, apply or upgrade systems with explicit mappings, bind native elements to semantic tokens, and insert editable component variants with text/image slots.
+
+Custom WOFF2/WOFF/TTF/OTF fonts and Unicode subsets use the same renderer in the editor, PNG/PDF and standalone HTML. Portable project and system exports include required fonts and images. New checks report token usage, component provenance, font loading and missing glyphs. Source code is never executed; unsupported React behavior requires translation by the connected agent.
+
+See DESIGN_SYSTEMS.md and CLAUDE_DESIGN_PORTING.md for exact import limits and evidence. A genuine Claude Design account migration is not claimed without a supplied real export or authenticated session. Stop older workspace services before upgrading. Existing legacy documents/history remain readable without a bulk rewrite; documents using the new fields require 0.2.0 or newer. npm registry publication remains unperformed.
+
 # 0.1.1
 
 Fix rapid consecutive inspector edits. Deliberate link/numeric reversions now save even before an earlier response reaches the browser. Compound changes to table cells, brands, crop axes, rich formatting, groups, page dimensions and ordering derive from the latest saved state when they execute, preserving earlier queued edits. Untouched fields still produce no mutation, and intervening changes from another actor still require review. Delayed-response regressions cover these cases and preservation of newer focused drafts.

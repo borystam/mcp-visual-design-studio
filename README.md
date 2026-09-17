@@ -4,14 +4,14 @@
 
 ![Studio editor with the original Fieldwork example](docs/demo.png)
 
-[Watch the short editing demo](docs/demo.webm) · [Release](https://github.com/borystam/mcp-visual-design-studio/releases/tag/v0.1.1) · [Compatibility and test evidence](docs/VALIDATION.md)
+[Watch the short editing demo](docs/demo.webm) · [Release](https://github.com/borystam/mcp-visual-design-studio/releases/tag/v0.2.0) · [Compatibility and test evidence](docs/VALIDATION.md)
 
 ## Install the release
 
 Use **Node.js 24 LTS** (Node 22.12+ also supported). Download and install the release tarball; this version is **not published to the npm registry**.
 
 ```sh
-npm install -g https://github.com/borystam/mcp-visual-design-studio/releases/download/v0.1.1/mcp-visual-design-studio-0.1.1.tgz
+npm install -g https://github.com/borystam/mcp-visual-design-studio/releases/download/v0.2.0/mcp-visual-design-studio-0.2.0.tgz
 mcp-visual-design-studio doctor
 mcp-visual-design-studio editor
 ```
@@ -66,16 +66,26 @@ Browser comments **do not wake an idle agent**. Ask the connected host to read t
 - Blank canvas plus **Fieldwork** service sheet, **Gather** three-page brochure, and **Signal** two-page visual report. All examples are original and generic.
 - Multiple pages, custom dimensions, orientation and ordering; text, rich text runs, lists, explicit links, images, crop/fit, shapes, rules, tables and groups.
 - Positioned elements and stack/grid groups; selection, drag, resize, keyboard nudge, align, duplicate, delete and layer ordering.
-- Reusable local brand kits: colors, bundled fonts, logos and structured components.
+- Reusable local brand kits, plus **versioned design systems** with named tokens, custom fonts, guidelines, component variants and editable content slots. Import DTCG token JSON, CSS, static HTML, source ZIPs or portable Studio systems; review before saving or making a system the workspace default.
 - Element comments, selection context, live browser/agent synchronization, retained text drafts and explicit conflict resolution.
 - Durable revision history, guarded operation undo/redo, named snapshots and side-by-side variation previews.
 - PDF, PNG, self-contained HTML, and portable editable `.vds.json` project bundles. Exports use a requested saved revision, never an in-flight document.
 
-The editor retains native text and structured elements. Examples contain no flattened design artwork. The first release does not include cloud accounts, remote multiplayer, animation, advanced vector tools, arbitrary fonts, office-file reconstruction or built-in model chat.
+The editor retains native text and structured elements. Examples contain no flattened design artwork. The first release does not include cloud accounts, remote multiplayer, animation, advanced vector tools, arbitrary source-code execution, office-file reconstruction or built-in model chat.
+
+## Bring your own design system
+
+Open **Design systems**, import your token JSON, CSS, HTML or source ZIP, and review the generated specimen and warnings. Attach missing fonts/images, check the role assignments, then **Save version** and **Use as workspace default**. New documents inherit that exact version; existing documents offer an application preview with explicit token mappings. Saved versions are immutable, and each document embeds its system for offline exports and bundle transfers.
+
+Imported HTML uses a bounded static subset and remains editable. React/JavaScript source is identified for translation by your connected agent; it is never executed. This is not a lossless website, React, Figma or office-file converter. Custom WOFF2, WOFF, TTF and OTF fonts—including explicit Unicode subsets—are embedded in portable output; rendering checks flag missing glyphs.
+
+![Design-system library with editable tokens and a live specimen](docs/design-systems.png)
+
+[Design systems and supported token formats](docs/DESIGN_SYSTEMS.md) · [Porting Claude Design exports](docs/CLAUDE_DESIGN_PORTING.md)
 
 ## Local storage and lifecycle
 
-Projects live in `~/MCP Visual Design Studio` by default, outside the package and npx cache. Set `MCP_STUDIO_WORKSPACE` or pass `--workspace` to choose another directory. Back up this directory; it contains your documents, history, images, brand kits and exports. Stop the service before taking a filesystem-consistent backup.
+Projects live in `~/MCP Visual Design Studio` by default, outside the package and npx cache. Set `MCP_STUDIO_WORKSPACE` or pass `--workspace` to choose another directory. Back up this directory; it contains your documents, history, images, fonts, brand kits, versioned design systems and exports. Stop the service before taking a filesystem-consistent backup.
 
 ```sh
 mcp-visual-design-studio editor --workspace "/absolute/path/to/designs"

@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.2.0";
 export const RUNTIME_VERSION = 1;
 export const PACKAGE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));

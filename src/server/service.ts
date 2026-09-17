@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { timingSafeEqual, randomUUID } from "node:crypto";
+import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { WorkspaceStore, migrateDocument } from "../domain/store.js";
 import {
@@ -12,9 +12,22 @@ import {
   type Asset,
   type Document,
   type MutationResult,
+  DesignSystemMappingSchema,
+  validateDocument,
 } from "../domain/model.js";
-import { parseBatch } from "../domain/operations.js";
+import { applyOperations, parseBatch } from "../domain/operations.js";
 import { brandOperations } from "../domain/brand.js";
+import {
+  designSystemOperations,
+  mapTemplateToSystem,
+  checkDesignSystem,
+  instantiateComponent,
+  validateDesignSystem,
+} from "../domain/design-system.js";
+import { DesignSystemLibrary, SystemRefSchema } from "../systems/library.js";
+import { previewImport } from "../systems/import.js";
+import { systemSpecimen } from "../systems/specimen.js";
+import { safeDirectory } from "../export/assets.js";
 import { createDocument, templates } from "../domain/templates.js";
 import {
   exportDocument,
@@ -123,6 +136,13 @@ export async function startService(
   }
   const assetsDir = path.join(root, "assets"),
     exportsDir = path.join(root, "exports");
+  let systems: DesignSystemLibrary;
+  try {
+    systems = new DesignSystemLibrary(root, assetsDir);
+  } catch (error) {
+    release();
+    throw error;
+  }
   const events = new Set<ServerResponse>();
   const selections = new Map<
     string,
@@ -135,6 +155,12 @@ export async function startService(
     for (const res of events)
       res.write(
         `event: change\ndata: ${JSON.stringify({ documentId, revision: rev })}\n\n`,
+      );
+  };
+  const broadcastWorkspace = () => {
+    for (const res of events)
+      res.write(
+        `event: workspace\ndata: ${JSON.stringify({ workspaceId: descriptor.workspaceId })}\n\n`,
       );
   };
   const mutation = (result: MutationResult) => {
@@ -232,6 +258,8 @@ export async function startService(
             documents: store.list(),
             templates,
             brands: listBrands(),
+            designSystems: systems.list(),
+            defaultDesignSystem: systems.getDefault(),
             capabilities: {
               schemaVersion: 1,
               rendererVersion: 1,
@@ -239,6 +267,14 @@ export async function startService(
               transport: "stdio",
               liveUpdates: "SSE",
               commentsWakeAgent: false,
+              designSystems: true,
+              designSystemImports: [
+                "portable",
+                "dtcg",
+                "css",
+                "html",
+                "source-zip",
+              ],
             },
           });
         if (route === "/api/stop" && method === "POST") {
@@ -267,10 +303,30 @@ export async function startService(
         }
         if (route === "/api/documents" && method === "POST") {
           const v = z
-            .object({ name: nonempty, template: z.string().optional() })
+            .object({
+              name: nonempty,
+              template: z.string().optional(),
+              designSystem: SystemRefSchema.nullable().optional(),
+            })
             .strict()
             .parse(await body(req));
-          const doc = store.create(createDocument(v.name, v.template));
+          let initial = createDocument(v.name, v.template);
+          const ref =
+            v.designSystem === undefined
+              ? systems.getDefault()
+              : v.designSystem;
+          if (ref) {
+            const { system } = systems.read(ref.id, ref.version, ref.digest);
+            initial = applyOperations(
+              initial,
+              designSystemOperations(
+                initial,
+                system,
+                mapTemplateToSystem(initial, system),
+              ),
+            ).document;
+          }
+          const doc = store.create(initial);
           broadcast(doc.id, doc.revision);
           return json(res, doc, 201);
         }
@@ -279,9 +335,12 @@ export async function startService(
             .object({ data: z.string() })
             .strict()
             .parse(await body(req, 140 * 1024 * 1024));
-          const doc = store.create(
-            await importBundle(base64(v.data, 100 * 1024 * 1024), assetsDir),
+          const imported = await importBundle(
+            base64(v.data, 100 * 1024 * 1024),
+            assetsDir,
           );
+          if (imported.designSystem) systems.verifyKnown(imported.designSystem);
+          const doc = store.create(imported);
           broadcast(doc.id, doc.revision);
           return json(res, doc, 201);
         }
@@ -292,6 +351,7 @@ export async function startService(
             .parse(await body(req, 22 * 1024 * 1024));
           const migrated = migrateDocument(v.document);
           verifyAssets(migrated);
+          if (migrated.designSystem) systems.verifyKnown(migrated.designSystem);
           const now = new Date().toISOString();
           const doc = store.create({
             ...migrated,
@@ -303,6 +363,75 @@ export async function startService(
           broadcast(doc.id, doc.revision);
           return json(res, doc, 201);
         }
+        if (route === "/api/design-systems" && method === "GET")
+          return json(res, {
+            systems: systems.list(),
+            defaultSystem: systems.getDefault(),
+          });
+        if (route === "/api/design-systems/preview" && method === "POST") {
+          const draft = await previewImport(
+            await body(req, 145 * 1024 * 1024),
+            assetsDir,
+          );
+          systems.rememberAssets(draft.system.assets);
+          const validationErrors: string[] = [];
+          let specimen: Document;
+          try {
+            specimen = systemSpecimen(draft.system);
+          } catch (error) {
+            validationErrors.push((error as Error).message);
+            specimen = createDocument("Review required", "blank");
+          }
+          return json(res, { ...draft, validationErrors, specimen });
+        }
+        if (route === "/api/design-systems/assets" && method === "POST") {
+          const v = z
+            .object({ name: nonempty, data: z.string() })
+            .strict()
+            .parse(await body(req, 29 * 1024 * 1024));
+          const bytes = base64(v.data, 20 * 1024 * 1024),
+            asset = importAsset(bytes, v.name, assetsDir);
+          systems.rememberAssets({ [asset.id]: asset });
+          return json(res, asset, 201);
+        }
+        if (route === "/api/design-systems" && method === "POST") {
+          const v = z
+            .object({ system: z.unknown() })
+            .strict()
+            .parse(await body(req, 17 * 1024 * 1024));
+          const saved = systems.save(v.system);
+          broadcastWorkspace();
+          return json(res, saved, 201);
+        }
+        if (route === "/api/design-systems/default" && method === "POST") {
+          const v = z
+            .object({ system: SystemRefSchema.nullable() })
+            .strict()
+            .parse(await body(req));
+          const result = systems.setDefault(v.system);
+          broadcastWorkspace();
+          return json(res, result);
+        }
+        if (route === "/api/design-systems/export" && method === "POST") {
+          const ref = SystemRefSchema.parse(await body(req)),
+            data = systems.export(ref);
+          safeDirectory(exportsDir);
+          const filename = `${ref.id}-${ref.version}-${ref.digest.slice(0, 12)}.vds-system.json`;
+          const file = path.join(exportsDir, filename);
+          if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink())
+            fail(400, "Export path must not be a symbolic link.");
+          atomicJson(file, JSON.parse(data.toString("utf8")));
+          return json(res, {
+            filename,
+            url: `/api/downloads/${filename}`,
+            digest: ref.digest,
+          });
+        }
+        const systemRoute = route.match(
+          /^\/api\/design-systems\/([A-Za-z0-9_-]+)\/([A-Za-z0-9.-]+)$/,
+        );
+        if (systemRoute && method === "GET")
+          return json(res, systems.read(systemRoute[1], systemRoute[2]));
         if (route === "/api/brands") {
           if (method === "GET") return json(res, listBrands());
           if (method === "POST") {
@@ -343,10 +472,11 @@ export async function startService(
         const assetMatch = route.match(/^\/api\/assets\/([\w-]+)$/);
         if (assetMatch && method === "GET") {
           const assetId = id.parse(assetMatch[1]);
-          const asset = store
-            .list()
-            .map((d) => d.assets[assetId])
-            .find(Boolean);
+          const asset =
+            store
+              .list()
+              .map((d) => d.assets[assetId])
+              .find(Boolean) ?? systems.asset(assetId);
           if (!asset) fail(404, "Asset not found.");
           res.writeHead(200, {
             "Content-Type": asset.mime,
@@ -367,7 +497,9 @@ export async function startService(
           fs.createReadStream(p).pipe(res);
           return;
         }
-        const match = route.match(/^\/api\/documents\/([\w-]+)(?:\/(\w+))?$/);
+        const match = route.match(
+          /^\/api\/documents\/([\w-]+)(?:\/([\w-]+))?$/,
+        );
         if (match) {
           const docId = id.parse(match[1]),
             action = match[2];
@@ -379,10 +511,94 @@ export async function startService(
           if (action === "operations" && method === "POST") {
             const data = await body(req);
             const batch = parseBatch(data);
-            for (const op of batch.operations)
+            for (const op of batch.operations) {
               if (op.type === "register_asset")
                 readVerifiedAsset(op.asset, assetsDir);
+              if (op.type === "set_document" && op.patch.designSystem)
+                systems.verifyKnown(op.patch.designSystem);
+            }
             return json(res, mutation(store.apply(docId, data as never)));
+          }
+          if (action === "system-check" && method === "POST")
+            return json(res, {
+              documentId: docId,
+              revision: store.get(docId).revision,
+              diagnostics: checkDesignSystem(store.get(docId)),
+            });
+          if (action === "design-system" && method === "POST") {
+            const v = SystemRefSchema.extend({
+              operationId: id,
+              actor: nonempty,
+              expectedRevision: revision,
+              mapping: DesignSystemMappingSchema.optional(),
+            })
+              .strict()
+              .parse(await body(req));
+            const { system } = systems.read(v.id, v.version, v.digest),
+              base = store.get(docId, v.expectedRevision);
+            return json(
+              res,
+              mutation(
+                store.apply(docId, {
+                  operationId: v.operationId,
+                  actor: v.actor,
+                  expectedRevision: v.expectedRevision,
+                  operations: designSystemOperations(base, system, v.mapping),
+                }),
+              ),
+            );
+          }
+          if (action === "component" && method === "POST") {
+            const v = z
+              .object({
+                operationId: id,
+                actor: nonempty,
+                expectedRevision: revision,
+                componentId: id,
+                variant: id.optional(),
+                slots: z.record(z.string(), z.string()).optional(),
+                pageId: id,
+                parentId: id.optional(),
+                x: z.number().min(-10000).max(10000).optional(),
+                y: z.number().min(-10000).max(10000).optional(),
+              })
+              .strict()
+              .parse(await body(req));
+            const base = store.get(docId, v.expectedRevision);
+            if (!base.designSystem)
+              fail(400, "Apply a design system before inserting a component.");
+            let serial = 0;
+            const element = instantiateComponent(
+              base.designSystem,
+              v.componentId,
+              {
+                variant: v.variant,
+                slots: v.slots,
+                assets: base.assets,
+                idFactory: () =>
+                  `el_${createHash("sha256").update(`${docId}:${v.operationId}:${++serial}`).digest("hex").slice(0, 32)}`,
+              },
+            );
+            element.x = v.x ?? 48;
+            element.y = v.y ?? 48;
+            return json(
+              res,
+              mutation(
+                store.apply(docId, {
+                  operationId: v.operationId,
+                  actor: v.actor,
+                  expectedRevision: v.expectedRevision,
+                  operations: [
+                    {
+                      type: "add_element",
+                      pageId: v.pageId,
+                      parentId: v.parentId,
+                      element,
+                    },
+                  ],
+                }),
+              ),
+            );
           }
           if (action === "brand" && method === "POST") {
             const v = z

@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  designSystemIssues,
+  documentDesignSystemIssues,
+  normalizeUnicodeRange,
+} from "./design-system.js";
 export type {
   MutationResult,
   HistoryEntry,
@@ -27,13 +32,84 @@ export const IdSchema = z
 export const ColorSchema = z
   .string()
   .regex(/^(?:#[0-9a-fA-F]{3,4}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}|transparent)$/);
-export const FontSchema = z.enum([
+export const BUILTIN_FONTS = [
   "Inter",
   "Lora",
+  "IBM Plex Mono",
   "monospace",
   "sans-serif",
   "serif",
-]);
+] as const;
+export const FontSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9 _-]{0,79}$/, "Invalid font family name");
+export const TokenPathSchema = z
+  .string()
+  .max(200)
+  .regex(/^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/)
+  .refine(
+    (value) =>
+      !value
+        .split(".")
+        .some((part) =>
+          ["__proto__", "prototype", "constructor"].includes(part),
+        ),
+    "Unsafe token path",
+  );
+export const SystemVersionSchema = z
+  .string()
+  .max(64)
+  .regex(
+    /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/,
+  );
+export const TOKEN_BINDING_KEYS = [
+  "color",
+  "background",
+  "borderColor",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "borderWidth",
+  "borderRadius",
+  "opacity",
+  "padding",
+  "gap",
+] as const;
+export type TokenBindingKey = (typeof TOKEN_BINDING_KEYS)[number];
+export type TokenBindings = Partial<Record<TokenBindingKey, string>>;
+export type TokenBindingPatch = Partial<Record<TokenBindingKey, string | null>>;
+export const TokenBindingsSchema = z
+  .object(
+    Object.fromEntries(
+      TOKEN_BINDING_KEYS.map((key) => [key, TokenPathSchema.optional()]),
+    ) as Record<TokenBindingKey, z.ZodOptional<typeof TokenPathSchema>>,
+  )
+  .strict();
+export const TokenBindingPatchSchema = z
+  .object(
+    Object.fromEntries(
+      TOKEN_BINDING_KEYS.map((key) => [
+        key,
+        TokenPathSchema.nullable().optional(),
+      ]),
+    ) as Record<
+      TokenBindingKey,
+      z.ZodOptional<z.ZodNullable<typeof TokenPathSchema>>
+    >,
+  )
+  .strict();
+export const ComponentSourceSchema = z
+  .object({
+    systemId: IdSchema,
+    systemVersion: SystemVersionSchema,
+    componentId: IdSchema,
+    variant: IdSchema.optional(),
+  })
+  .strict();
+export type ComponentSource = z.infer<typeof ComponentSourceSchema>;
 const n = (min: number, max: number) => z.number().finite().min(min).max(max);
 const NameSchema = z.string().trim().min(1).max(200);
 const UrlSchema = z
@@ -57,9 +133,7 @@ export const StyleSchema = z
     background: ColorSchema.optional(),
     fontFamily: FontSchema.optional(),
     fontSize: n(1, 1000).optional(),
-    fontWeight: z
-      .union([z.literal(400), z.literal(500), z.literal(600), z.literal(700)])
-      .optional(),
+    fontWeight: z.number().int().min(100).max(900).optional(),
     fontStyle: z.enum(["normal", "italic"]).optional(),
     textDecoration: z.enum(["none", "underline", "line-through"]).optional(),
     lineHeight: n(0.5, 5).optional(),
@@ -104,6 +178,8 @@ export interface Element {
   gap?: number;
   columns?: number;
   children?: Element[];
+  tokenBindings?: TokenBindings;
+  componentSource?: ComponentSource;
 }
 // Explicit annotation prevents recursive inference from leaking server-only types into the editor.
 export const ElementSchema: z.ZodType<Element> = z.lazy(() =>
@@ -135,6 +211,8 @@ export const ElementSchema: z.ZodType<Element> = z.lazy(() =>
       gap: n(0, 1000).optional(),
       columns: z.number().int().min(1).max(100).optional(),
       children: z.array(ElementSchema).max(LIMITS.elements).optional(),
+      tokenBindings: TokenBindingsSchema.optional(),
+      componentSource: ComponentSourceSchema.optional(),
     })
     .strict()
     .superRefine((element, ctx) => {
@@ -190,6 +268,7 @@ export const PageSchema = z
     width: n(1, 10000),
     height: n(1, 10000),
     background: ColorSchema,
+    backgroundToken: TokenPathSchema.optional(),
     elements: z.array(ElementSchema).max(LIMITS.elements),
   })
   .strict();
@@ -204,6 +283,10 @@ export const AssetSchema = z
       "image/webp",
       "image/gif",
       "image/svg+xml",
+      "font/woff2",
+      "font/woff",
+      "font/ttf",
+      "font/otf",
     ]),
     bytes: z.number().int().min(1).max(LIMITS.imageBytes),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -223,6 +306,146 @@ export const BrandKitSchema = z
   })
   .strict();
 export type BrandKit = z.infer<typeof BrandKitSchema>;
+const alias = z.object({ ref: TokenPathSchema }).strict();
+export const DesignTokenSchema = z.discriminatedUnion("type", [
+  z
+    .object({ type: z.literal("color"), value: z.union([ColorSchema, alias]) })
+    .strict(),
+  z
+    .object({
+      type: z.literal("dimension"),
+      value: z.union([n(-10000, 10000), alias]),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("number"),
+      value: z.union([n(-10000, 10000), alias]),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("fontFamily"),
+      value: z.union([FontSchema, alias]),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("fontWeight"),
+      value: z.union([z.number().int().min(100).max(900), alias]),
+    })
+    .strict(),
+]);
+export type DesignToken = z.infer<typeof DesignTokenSchema>;
+export const UnicodeRangeSchema = z
+  .string()
+  .max(1024)
+  .transform((value, ctx) => {
+    try {
+      return normalizeUnicodeRange(value);
+    } catch (error) {
+      ctx.addIssue({ code: "custom", message: (error as Error).message });
+      return z.NEVER;
+    }
+  });
+export const FontFaceSchema = z
+  .object({
+    family: FontSchema,
+    assetId: IdSchema,
+    weight: z.number().int().min(100).max(900),
+    style: z.enum(["normal", "italic"]),
+    license: z.string().max(4000).optional(),
+    unicodeRange: UnicodeRangeSchema.optional(),
+  })
+  .strict();
+export type FontFace = z.infer<typeof FontFaceSchema>;
+export const DesignComponentSchema = z
+  .object({
+    id: IdSchema,
+    name: NameSchema,
+    description: z.string().max(4000).optional(),
+    element: ElementSchema,
+    variants: z
+      .record(IdSchema, ElementSchema)
+      .refine((v) => Object.keys(v).length <= 50)
+      .default({}),
+    slots: z
+      .record(
+        IdSchema,
+        z
+          .object({ type: z.enum(["text", "image"]), elementId: IdSchema })
+          .strict(),
+      )
+      .refine((v) => Object.keys(v).length <= 100)
+      .default({}),
+  })
+  .strict();
+export type DesignComponent = z.infer<typeof DesignComponentSchema>;
+export const BaseDesignSystemSchema = z
+  .object({
+    id: IdSchema,
+    name: NameSchema,
+    version: SystemVersionSchema,
+    tokens: z
+      .record(TokenPathSchema, DesignTokenSchema)
+      .refine((v) => Object.keys(v).length <= 2000)
+      .default({}),
+    fonts: z.array(FontFaceSchema).max(200).default([]),
+    components: z.array(DesignComponentSchema).max(200).default([]),
+    guidelines: z.array(z.string().min(1).max(10000)).max(200).default([]),
+    sources: z
+      .array(
+        z
+          .object({
+            name: NameSchema,
+            url: z
+              .string()
+              .max(2048)
+              .url()
+              .refine((v) => /^https?:\/\//i.test(v))
+              .optional(),
+          })
+          .strict(),
+      )
+      .max(100)
+      .default([]),
+    assets: z
+      .record(IdSchema, AssetSchema)
+      .refine((v) => Object.keys(v).length <= 1000)
+      .default({}),
+    roles: z
+      .object({
+        primaryColor: TokenPathSchema.optional(),
+        accentColor: TokenPathSchema.optional(),
+        pageBackground: TokenPathSchema.optional(),
+        headingFont: TokenPathSchema.optional(),
+        bodyFont: TokenPathSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    rules: z
+      .object({
+        requireTokenBindings: z.boolean().optional(),
+        minimumFontSize: n(1, 1000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export const DesignSystemSchema = BaseDesignSystemSchema.superRefine(
+  (system, ctx) => {
+    for (const message of designSystemIssues(system))
+      ctx.addIssue({ code: "custom", message });
+  },
+);
+export type DesignSystem = z.infer<typeof DesignSystemSchema>;
+export const DesignSystemMappingSchema = z
+  .object({
+    elements: z.record(IdSchema, TokenBindingPatchSchema).optional(),
+    pages: z.record(IdSchema, TokenPathSchema.nullable()).optional(),
+  })
+  .strict();
+export type DesignSystemMapping = z.infer<typeof DesignSystemMappingSchema>;
 export const CommentSchema = z
   .object({
     id: IdSchema,
@@ -246,6 +469,7 @@ export const BaseDocumentSchema = z
     updatedAt: TimestampSchema,
     pages: z.array(PageSchema).min(1).max(LIMITS.pages),
     brand: BrandKitSchema,
+    designSystem: DesignSystemSchema.optional(),
     assets: z
       .record(IdSchema, AssetSchema)
       .refine((v) => Object.keys(v).length <= 1000),
@@ -273,8 +497,11 @@ export const DocumentSchema = BaseDocumentSchema.superRefine((doc, ctx) => {
       add(e.id);
       count++;
       if (pageId) elementPages.set(e.id, pageId);
-      if (e.assetId && !doc.assets[e.assetId])
-        ctx.addIssue({ code: "custom", message: `Unknown asset ${e.assetId}` });
+      if (e.assetId && !doc.assets[e.assetId]?.mime.startsWith("image/"))
+        ctx.addIssue({
+          code: "custom",
+          message: `Unknown image asset ${e.assetId}`,
+        });
       if (e.children) visit(e.children, depth + 1, pageId);
     }
   };
@@ -288,7 +515,10 @@ export const DocumentSchema = BaseDocumentSchema.superRefine((doc, ctx) => {
     if (key !== asset.id)
       ctx.addIssue({ code: "custom", message: "Asset key must match its ID" });
   }
-  if (doc.brand.logoAssetId && !doc.assets[doc.brand.logoAssetId])
+  if (
+    doc.brand.logoAssetId &&
+    !doc.assets[doc.brand.logoAssetId]?.mime.startsWith("image/")
+  )
     ctx.addIssue({ code: "custom", message: "Brand logo asset is missing" });
   for (const comment of doc.comments) {
     add(comment.id);
@@ -314,6 +544,8 @@ export const DocumentSchema = BaseDocumentSchema.superRefine((doc, ctx) => {
   }
   if (count > LIMITS.elements)
     ctx.addIssue({ code: "custom", message: "Too many elements" });
+  for (const message of documentDesignSystemIssues(doc))
+    ctx.addIssue({ code: "custom", message });
 });
 
 export class DomainError extends Error {

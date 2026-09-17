@@ -1,24 +1,36 @@
 import React, { type CSSProperties } from "react";
-import type { Document, Page, Element, BrandKit } from "../domain/model.js";
+import type {
+  Document,
+  Page,
+  Element,
+  BrandKit,
+  DesignSystem,
+  Asset,
+} from "../domain/model.js";
+import {
+  resolveDocument,
+  resolvePageTokens,
+  resolveBrandTokens,
+} from "../domain/design-system.js";
+import { customFontCss, fontFamilyCss } from "./fonts.js";
 
 type SelectHandler = (id: string, event: React.MouseEvent<HTMLElement>) => void;
 type RenderOptions = {
   assetUrl?: (id: string) => string;
   onSelect?: SelectHandler;
   selectedIds?: string[];
+  designSystem?: DesignSystem;
+  assets?: Record<string, Asset>;
+  includeFontStyles?: boolean;
+  tokensResolved?: boolean;
 };
-const family = (value: string | undefined) =>
-  value === "serif" || value === "Lora"
-    ? "Lora, Georgia, serif"
-    : value === "mono" || value === "monospace"
-      ? "IBM Plex Mono, monospace"
-      : "Inter, Arial, sans-serif";
 function ElementView({
   element: e,
   brand,
   assetUrl,
   onSelect,
   selectedIds,
+  designSystem,
   flow = false,
 }: RenderOptions & { element: Element; brand: BrandKit; flow?: boolean }) {
   const s = e.style;
@@ -30,7 +42,7 @@ function ElementView({
     height: e.height,
     color: s.color,
     background: s.background,
-    fontFamily: family(s.fontFamily ?? brand.fonts.body),
+    fontFamily: fontFamilyCss(s.fontFamily ?? brand.fonts.body, designSystem),
     fontSize: s.fontSize,
     fontWeight: s.fontWeight,
     fontStyle: s.fontStyle,
@@ -156,6 +168,7 @@ function ElementView({
         assetUrl={assetUrl}
         onSelect={onSelect}
         selectedIds={selectedIds}
+        designSystem={designSystem}
         flow={structured}
       />
     ));
@@ -177,6 +190,7 @@ function ElementView({
       style={style}
       data-element-id={e.id}
       data-element-type={e.type}
+      data-font-family={s.fontFamily ?? brand.fonts.body}
       data-selectable={onSelect ? "true" : undefined}
       data-selected={selectedIds?.includes(e.id) ? "true" : undefined}
       onClick={
@@ -198,6 +212,16 @@ export function PageView({
   brand,
   ...options
 }: RenderOptions & { page: Page; brand: BrandKit }) {
+  const resolved = options.tokensResolved
+    ? page
+    : resolvePageTokens(page, options.designSystem);
+  const resolvedBrand = options.tokensResolved
+    ? brand
+    : resolveBrandTokens(brand, options.designSystem);
+  const fonts =
+    options.includeFontStyles === false
+      ? ""
+      : customFontCss(options.designSystem, options.assets, options.assetUrl);
   return (
     <section
       className="vds-page"
@@ -206,14 +230,15 @@ export function PageView({
       style={{
         width: page.width,
         height: page.height,
-        background: page.background,
+        background: resolved.background,
       }}
     >
-      {page.elements.map((element) => (
+      {fonts && <style data-custom-fonts="true">{fonts}</style>}
+      {resolved.elements.map((element) => (
         <ElementView
           key={element.id}
           element={element}
-          brand={brand}
+          brand={resolvedBrand}
           {...options}
         />
       ))}
@@ -224,18 +249,29 @@ export function DocumentView({
   document,
   ...options
 }: RenderOptions & { document: Document }) {
+  const resolved = resolveDocument(document);
+  const fonts = customFontCss(
+    resolved.designSystem,
+    resolved.assets,
+    options.assetUrl,
+  );
   return (
     <div
       className="vds-document"
       data-document-id={document.id}
       data-revision={document.revision}
     >
-      {document.pages.map((page) => (
+      {fonts && <style data-custom-fonts="true">{fonts}</style>}
+      {resolved.pages.map((page) => (
         <PageView
           key={page.id}
           page={page}
-          brand={document.brand}
+          brand={resolved.brand}
           {...options}
+          designSystem={resolved.designSystem}
+          assets={resolved.assets}
+          includeFontStyles={false}
+          tokensResolved={true}
         />
       ))}
     </div>

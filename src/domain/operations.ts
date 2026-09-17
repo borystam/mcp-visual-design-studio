@@ -11,12 +11,21 @@ import {
   PageSchema,
   RunSchema,
   StyleSchema,
+  DesignSystemSchema,
+  TokenBindingPatchSchema,
+  TokenPathSchema,
+  ComponentSourceSchema,
   assertSafeData,
   locateElement,
   validateDocument,
   type Document,
   type Element,
 } from "./model.js";
+import {
+  canonicalDesignSystem,
+  resolveElementTokens,
+  resolvePageTokens,
+} from "./design-system.js";
 
 const index = z.number().int().min(0).max(LIMITS.elements);
 const coordinate = z.number().finite().min(-10000).max(10000);
@@ -47,6 +56,8 @@ export const ElementPatchSchema = nonempty({
   width: size.optional(),
   height: size.optional(),
   style: StyleSchema.optional(),
+  tokenBindings: TokenBindingPatchSchema.optional(),
+  componentSource: ComponentSourceSchema.nullable().optional(),
   text: z.string().max(LIMITS.text).optional(),
   runs: z.array(RunSchema).max(1000).optional(),
   list: z.enum(["none", "bullet", "number"]).optional(),
@@ -72,6 +83,7 @@ export const OperationSchema = z.discriminatedUnion("type", [
       patch: nonempty({
         name: name.optional(),
         brand: BrandKitSchema.optional(),
+        designSystem: DesignSystemSchema.nullable().optional(),
       }),
     })
     .strict(),
@@ -91,6 +103,7 @@ export const OperationSchema = z.discriminatedUnion("type", [
         width: size.optional(),
         height: size.optional(),
         background: ColorSchema.optional(),
+        backgroundToken: TokenPathSchema.nullable().optional(),
       }),
     })
     .strict(),
@@ -202,24 +215,58 @@ export function applyOperations(
 ): { document: Document; affectedElementIds: string[] } {
   const doc = structuredClone(input);
   const affected = new Set<string>();
+  const systemIdentities = new Map<string, string>();
+  if (input.designSystem)
+    systemIdentities.set(
+      `${input.designSystem.id}@${input.designSystem.version}`,
+      canonicalDesignSystem(input.designSystem),
+    );
   for (const op of operations) {
     switch (op.type) {
       case "set_document":
+        if (op.patch.designSystem) {
+          const system = op.patch.designSystem;
+          const identity = `${system.id}@${system.version}`;
+          const content = canonicalDesignSystem(system);
+          const existing = systemIdentities.get(identity);
+          if (existing !== undefined && existing !== content)
+            throw new DomainError(
+              "CONFLICT",
+              `Design system ${identity} is immutable; change its version before changing its content`,
+              409,
+            );
+          systemIdentities.set(identity, content);
+        }
         Object.assign(doc, structuredClone(op.patch));
+        if (op.patch.designSystem === null) delete doc.designSystem;
         break;
       case "add_page":
         insert(doc.pages, structuredClone(op.page), op.index);
         op.page.elements.flatMap(treeIds).forEach((id) => affected.add(id));
         break;
-      case "update_page":
-        Object.assign(
-          required(
-            doc.pages.find((p) => p.id === op.pageId),
-            "Page not found",
-          ),
-          op.patch,
+      case "update_page": {
+        const page = required(
+          doc.pages.find((p) => p.id === op.pageId),
+          "Page not found",
         );
+        if (
+          op.patch.backgroundToken === null &&
+          page.backgroundToken &&
+          op.patch.background === undefined
+        )
+          page.background = resolvePageTokens(
+            page,
+            doc.designSystem,
+          ).background;
+        Object.assign(page, op.patch);
+        if (
+          op.patch.backgroundToken === null ||
+          (op.patch.background !== undefined &&
+            op.patch.backgroundToken === undefined)
+        )
+          delete page.backgroundToken;
         break;
+      }
       case "move_page": {
         const at = doc.pages.findIndex((p) => p.id === op.pageId);
         if (at < 0) throw new DomainError("NOT_FOUND", "Page not found", 404);
@@ -258,8 +305,34 @@ export function applyOperations(
         ).element;
         const patch = structuredClone(op.patch);
         const oldStyle = element.style;
+        const bindings = { ...element.tokenBindings };
+        const detached = Object.entries(patch.tokenBindings ?? {}).filter(
+          ([, value]) => value === null,
+        );
+        if (detached.some(([key]) => Object.hasOwn(bindings, key))) {
+          const resolved = resolveElementTokens(element, doc.designSystem);
+          for (const [key] of detached) {
+            if (!Object.hasOwn(bindings, key)) continue;
+            if (key === "gap" && patch.gap === undefined)
+              element.gap = resolved.gap;
+            else if (key !== "gap" && !Object.hasOwn(patch.style ?? {}, key))
+              Object.assign(oldStyle, {
+                [key]: resolved.style[key as keyof typeof resolved.style],
+              });
+          }
+        }
         Object.assign(element, patch);
         if (patch.style) element.style = { ...oldStyle, ...patch.style };
+        for (const key of Object.keys(patch.style ?? {}))
+          delete bindings[key as keyof typeof bindings];
+        if (patch.gap !== undefined) delete bindings.gap;
+        for (const [key, value] of Object.entries(patch.tokenBindings ?? {})) {
+          if (value === null) delete bindings[key as keyof typeof bindings];
+          else bindings[key as keyof typeof bindings] = value;
+        }
+        if (Object.keys(bindings).length) element.tokenBindings = bindings;
+        else delete element.tokenBindings;
+        if (patch.componentSource === null) delete element.componentSource;
         if (patch.text !== undefined && patch.runs === undefined)
           delete element.runs;
         if (patch.href === null) delete element.href;

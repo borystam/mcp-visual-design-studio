@@ -1,6 +1,6 @@
 {
   "name": "mcp-visual-design-studio",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A local visual document editor shared by people and MCP agents.",
   "type": "module",
   "license": "MIT",
@@ -40,10 +40,15 @@
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
     "@xmldom/xmldom": "^0.9.12",
+    "culori": "4.0.2",
+    "fontkit": "2.0.4",
+    "parse5": "8.0.1",
     "pdf-lib": "^1.17.1",
     "playwright": "1.63.0",
+    "postcss": "8.5.28",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "yauzl": "3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -52,9 +57,12 @@
     "@fontsource/lora": "^5.3.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@playwright/test": "1.63.0",
+    "@types/culori": "4.0.1",
+    "@types/fontkit": "2.0.9",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/yauzl": "3.4.0",
     "prettier": "^3.9.7",
     "tsx": "^4.20.0",
     "typescript": "7.0.2",

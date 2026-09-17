@@ -15,6 +15,21 @@ import {
 import "./style.css";
 import { brandOperations } from "../domain/brand.js";
 import { preserveTextRuns } from "./drafts.js";
+import { DesignSystems } from "./DesignSystems.js";
+import {
+  DocumentSystemControls,
+  TokenBindingControls,
+} from "./DocumentSystemControls.js";
+import {
+  instantiateComponent,
+  resolveBrandTokens,
+  resolveElementTokens,
+} from "../domain/design-system.js";
+import {
+  systemKey,
+  type SystemReference,
+  type SystemSummary,
+} from "./design-system-api.js";
 
 import type {
   Document as Doc,
@@ -23,6 +38,8 @@ import type {
   BrandKit as Brand,
   Style,
   TextRun,
+  Asset,
+  DesignSystemMapping,
 } from "../domain/model.js";
 type Workspace = {
   workspaceId: string;
@@ -30,6 +47,8 @@ type Workspace = {
   documents: Doc[];
   templates: { id: string; name: string; description: string }[];
   brands: Brand[];
+  designSystems?: SystemSummary[];
+  defaultDesignSystem?: SystemReference | null;
 };
 type History = {
   operationId: string;
@@ -393,6 +412,8 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [modal, setModal] = useState<"new" | "export" | "compare" | null>(null);
   const [newName, setNewName] = useState("Untitled design");
+  const [systemsOpen, setSystemsOpen] = useState(false);
+  const [newSystem, setNewSystem] = useState("workspace");
   const [template, setTemplate] = useState("blank");
   const [zoom, setZoom] = useState(0.68);
   const [history, setHistory] = useState<History[]>([]);
@@ -432,6 +453,12 @@ function App() {
   const page = doc?.pages.find((p) => p.id === pageId) ?? doc?.pages[0];
   const info = locate(doc, selected[0]);
   const item = info?.item;
+  const resolvedStyle = item
+    ? resolveElementTokens(item, doc?.designSystem).style
+    : {};
+  const resolvedBodyFont = doc
+    ? resolveBrandTokens(doc.brand, doc.designSystem).fonts.body
+    : "Inter";
   const activeDraftKey = doc && item ? draftKey(doc.id, item.id) : undefined;
   const draft = activeDraftKey ? drafts[activeDraftKey] : undefined;
   const dirty = !!draft && draft.text !== draft.base;
@@ -569,6 +596,9 @@ function App() {
           void refresh(change.documentId).catch(error);
         else
           void api<Workspace>("/api/workspace").then(setWorkspace).catch(error);
+      });
+      events.addEventListener("workspace", () => {
+        void api<Workspace>("/api/workspace").then(setWorkspace).catch(error);
       });
       events.onerror = () => setConnected(false);
     };
@@ -1173,7 +1203,7 @@ function App() {
     if (type === "text") {
       defaults.text = "Make something worth sharing.";
       defaults.style = {
-        fontFamily: doc?.brand.fonts.body ?? "Inter",
+        fontFamily: resolvedBodyFont,
         fontSize: 24,
         color: "#25282b",
         lineHeight: 1.35,
@@ -1214,10 +1244,26 @@ function App() {
       ];
       defaults.style = { background: "#f0f2ed", padding: 24 };
     }
-    void apply(
-      [{ type: "add_element", pageId: page.id, element: defaults }],
-      "Element added",
-    ).then((next) => {
+    const targetPageId = page.id;
+    void apply((current) => {
+      const element = structuredClone(defaults);
+      const brand = resolveBrandTokens(current.brand, current.designSystem);
+      if (type === "text" || type === "table") {
+        element.style.fontFamily = brand.fonts.body;
+        if (current.designSystem?.roles?.bodyFont)
+          element.tokenBindings = {
+            fontFamily: current.designSystem.roles.bodyFont,
+          };
+      }
+      if (type === "group" && element.children?.[0]) {
+        element.children[0].style.fontFamily = brand.fonts.heading;
+        if (current.designSystem?.roles?.headingFont)
+          element.children[0].tokenBindings = {
+            fontFamily: current.designSystem.roles.headingFont,
+          };
+      }
+      return [{ type: "add_element", pageId: targetPageId, element }];
+    }, "Element added").then((next) => {
       if (next) select([defaults.id]);
     });
   }
@@ -1428,6 +1474,24 @@ function App() {
         await api("/api/documents", {
           name: newName.trim() || "Untitled design",
           template,
+          ...(newSystem === "none"
+            ? { designSystem: null }
+            : newSystem !== "workspace"
+              ? {
+                  designSystem: (() => {
+                    const system = workspace?.designSystems?.find(
+                      (system) => systemKey(system) === newSystem,
+                    );
+                    return system
+                      ? {
+                          id: system.id,
+                          version: system.version,
+                          digest: system.digest,
+                        }
+                      : null;
+                  })(),
+                }
+              : {}),
         }),
       );
       setModal(null);
@@ -1436,6 +1500,100 @@ function App() {
       error(e);
     } finally {
       setBusy(false);
+    }
+  }
+  async function applyDesignSystem(
+    reference: SystemReference,
+    mapping: DesignSystemMapping,
+    documentId: string,
+  ) {
+    return enqueueMutation(documentId, async (current) => {
+      const result = await api(`/api/documents/${current.id}/design-system`, {
+        ...reference,
+        mapping,
+        operationId: uid(),
+        actor,
+        expectedRevision: current.revision,
+      });
+      acceptMutation(result.document);
+      setNotice({ text: `Design system applied to ${result.document.name}` });
+      return result.document as Doc;
+    });
+  }
+  async function uploadSlotAsset(file: File): Promise<Asset | undefined> {
+    const documentId = doc?.id;
+    if (!documentId) return;
+    return enqueueMutation(documentId, async (current) => {
+      const result = await api(`/api/documents/${current.id}/assets`, {
+        name: file.name,
+        data: await base64(file),
+        operationId: uid(),
+        actor,
+        expectedRevision: current.revision,
+      });
+      acceptMutation(result.document);
+      return result.asset;
+    });
+  }
+  async function insertSystemComponent(
+    componentId: string,
+    variant: string | undefined,
+    slots: Record<string, string>,
+    targetPageId: string,
+  ) {
+    let id = "";
+    const saved = await apply((current) => {
+      if (!current.designSystem)
+        throw new Error("Choose a design system before inserting a component.");
+      currentPage(current, targetPageId);
+      const element = instantiateComponent(current.designSystem, componentId, {
+        variant,
+        slots,
+        assets: current.assets,
+      });
+      id = element.id;
+      return [
+        {
+          type: "add_element",
+          pageId: targetPageId,
+          element: { ...element, x: 64, y: 80 },
+        },
+      ];
+    }, "Component inserted as an editable copy");
+    if (saved && docRef.current?.id === saved.id) {
+      select([id], targetPageId);
+      setTab("design");
+    }
+  }
+  async function insertSystemImage(assetId: string, targetPageId: string) {
+    const id = uid();
+    const saved = await apply((current) => {
+      const asset = current.assets[assetId];
+      if (!asset?.mime.startsWith("image/"))
+        throw new Error("Choose an image from this document’s system assets.");
+      currentPage(current, targetPageId);
+      return [
+        {
+          type: "add_element",
+          pageId: targetPageId,
+          element: {
+            id,
+            type: "image",
+            name: asset.name,
+            assetId,
+            x: 64,
+            y: 80,
+            width: 240,
+            height: 160,
+            fit: "contain",
+            style: {},
+          },
+        },
+      ];
+    }, "System image inserted");
+    if (saved && docRef.current?.id === saved.id) {
+      select([id], targetPageId);
+      setTab("design");
     }
   }
   async function undo(entry: History) {
@@ -1620,6 +1778,8 @@ function App() {
     <PageView
       page={p}
       brand={d.brand}
+      designSystem={d.designSystem}
+      assets={d.assets}
       assetUrl={assets}
       selectedIds={selected}
     />
@@ -1638,7 +1798,18 @@ function App() {
       ))}
     </div>
   );
-  const fonts = ["Inter", "Lora", "monospace"];
+  const fonts = [
+    ...new Set([
+      "Inter",
+      "Lora",
+      "monospace",
+      "sans-serif",
+      "serif",
+      resolvedBodyFont,
+      ...(resolvedStyle.fontFamily ? [resolvedStyle.fontFamily] : []),
+      ...(doc?.designSystem?.fonts.map((font) => font.family) ?? []),
+    ]),
+  ];
   const templatePreviews = useMemo(
     () =>
       Object.fromEntries(
@@ -1728,9 +1899,19 @@ function App() {
         </div>
         <div className="top-actions">
           <Button
+            icon="grid"
+            onClick={() => {
+              setModal(null);
+              setSystemsOpen(true);
+            }}
+          >
+            Design Systems
+          </Button>
+          <Button
             icon="plus"
             onClick={() => {
               setNewName("Untitled design");
+              setNewSystem("workspace");
               setModal("new");
             }}
           >
@@ -2489,11 +2670,7 @@ function App() {
                       <div className="section-label spaced">TYPOGRAPHY</div>
                       <select
                         aria-label="Font family"
-                        value={
-                          item.style.fontFamily ??
-                          doc?.brand.fonts.body ??
-                          "Inter"
-                        }
+                        value={resolvedStyle.fontFamily ?? resolvedBodyFont}
                         onChange={(e) =>
                           void style({
                             fontFamily: e.target.value as Style["fontFamily"],
@@ -2507,13 +2684,13 @@ function App() {
                       <div className="field-grid">
                         <Field
                           label="Font size"
-                          value={Number(item.style.fontSize ?? 16)}
+                          value={Number(resolvedStyle.fontSize ?? 16)}
                           min={4}
                           onChange={(fontSize) => void style({ fontSize })}
                         />
                         <Field
                           label="Line height"
-                          value={Number(item.style.lineHeight ?? 1.4)}
+                          value={Number(resolvedStyle.lineHeight ?? 1.4)}
                           min={0.5}
                           step={0.05}
                           onChange={(lineHeight) => void style({ lineHeight })}
@@ -2934,8 +3111,42 @@ function App() {
               ) : null}
             </>
           ) : null}
+          {tab === "design" && doc && (
+            <TokenBindingControls
+              document={doc}
+              element={item}
+              pageId={page?.id}
+              onBind={(id, tokenBindings) => {
+                void apply([
+                  {
+                    type: "update_element",
+                    elementId: id,
+                    patch: { tokenBindings },
+                  },
+                ]);
+              }}
+              onPageBind={(id, backgroundToken) => {
+                void apply([
+                  {
+                    type: "update_page",
+                    pageId: id,
+                    patch: { backgroundToken },
+                  },
+                ]);
+              }}
+            />
+          )}
           {tab === "brand" && doc && (
             <>
+              <DocumentSystemControls
+                document={doc}
+                pageId={page?.id}
+                onLibrary={() => setSystemsOpen(true)}
+                onUpload={uploadSlotAsset}
+                onInsert={insertSystemComponent}
+                onInsertImage={insertSystemImage}
+                onSelect={(id, pageId) => select([id], pageId)}
+              />
               <div className="inspector-title">
                 <div>
                   <span className="eyebrow">YOUR DESIGN DNA</span>
@@ -3387,6 +3598,17 @@ function App() {
           )}
         </aside>
       </main>
+      <DesignSystems
+        open={systemsOpen}
+        workspaceSignature={`${workspace?.designSystems?.map((system) => system.digest).join(",") ?? ""}:${workspace?.defaultDesignSystem?.digest ?? ""}`}
+        onClose={() => setSystemsOpen(false)}
+        document={doc}
+        selectedIds={selected}
+        onLibraryChange={async () =>
+          setWorkspace(await api<Workspace>("/api/workspace"))
+        }
+        onApply={applyDesignSystem}
+      />
       {notice && (
         <div
           className={`toast ${notice.error ? "error" : ""}`}
@@ -3449,6 +3671,38 @@ function App() {
                     onChange={(e) => setNewName(e.target.value)}
                   />
                 </label>
+                <div className="new-system-choice">
+                  <div>
+                    <strong>Design system</strong>
+                    <p>
+                      Use the workspace default, choose a saved version, or
+                      start with literal styles.
+                    </p>
+                  </div>
+                  <label className="field">
+                    <span>System for this design</span>
+                    <select
+                      aria-label="Design system for new design"
+                      value={newSystem}
+                      onChange={(event) => setNewSystem(event.target.value)}
+                    >
+                      <option value="workspace">
+                        {workspace?.defaultDesignSystem
+                          ? `Workspace default · ${workspace.designSystems?.find((system) => system.digest === workspace.defaultDesignSystem?.digest)?.name ?? workspace.defaultDesignSystem.version}`
+                          : "Workspace default · no system"}
+                      </option>
+                      <option value="none">No design system</option>
+                      {workspace?.designSystems?.map((system) => (
+                        <option
+                          key={systemKey(system)}
+                          value={systemKey(system)}
+                        >
+                          {system.name} · v{system.version}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <div className="template-grid">
                   {(workspace?.templates?.length
                     ? workspace.templates
@@ -3474,6 +3728,8 @@ function App() {
                             <PageView
                               page={templatePreviews[t.id].pages[0]}
                               brand={templatePreviews[t.id].brand}
+                              designSystem={templatePreviews[t.id].designSystem}
+                              assets={templatePreviews[t.id].assets}
                             />
                           </div>
                         )}
